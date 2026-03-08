@@ -9644,7 +9644,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         source: "automation",
         reason: "auto_retry_after_failure",
         triggerDetail: "system",
-        payload: taskKey ? { issueId: taskKey } : null,
+        payload: { issueId: taskKey },
       }).catch((err) => {
         logger.warn({ err, agentId, taskKey }, "auto-retry wakeup enqueue failed");
       });
