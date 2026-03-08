@@ -1567,6 +1567,11 @@ export function heartbeatService(
       options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt;
 
     const runningCount = await countRunningRunsForAgent(agentId);
+    const willRetry =
+      runningCount === 0 &&
+      (outcome === "failed" || outcome === "timed_out") &&
+      (await shouldAutoRetry(agentId, taskKey ?? null));
+
     const nextStatus =
       runningCount > 0
         ? "running"
@@ -1575,7 +1580,9 @@ export function heartbeatService(
             outcome === "cancelled" ||
             (outcome === "failed" && options?.keepIdleOnFailure)
           ? "idle"
-          : "error";
+          : willRetry
+            ? "idle"
+            : "error";
 
     const updated = await db
       .update(agents)
@@ -1616,6 +1623,18 @@ export function heartbeatService(
             : null,
           outcome,
         },
+      });
+    }
+
+    if (willRetry) {
+      logger.info({ agentId, taskKey }, "auto-retrying agent after failure");
+      await enqueueWakeup(agentId, {
+        source: "automation",
+        reason: "auto_retry_after_failure",
+        triggerDetail: "system",
+        payload: taskKey ? { issueId: taskKey } : null,
+      }).catch((err) => {
+        logger.warn({ err, agentId, taskKey }, "auto-retry wakeup enqueue failed");
       });
     }
   }
