@@ -9640,14 +9640,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     if (willRetry) {
       logger.info({ agentId, taskKey }, "auto-retrying agent after failure");
-      await enqueueWakeup(agentId, {
+      const retryWakeup = await enqueueWakeup(agentId, {
         source: "automation",
         reason: "auto_retry_after_failure",
         triggerDetail: "system",
         payload: { issueId: taskKey },
       }).catch((err) => {
         logger.warn({ err, agentId, taskKey }, "auto-retry wakeup enqueue failed");
+        return null;
       });
+      if (!retryWakeup) {
+        logger.warn({ agentId, taskKey }, "auto-retry wakeup was skipped or failed; agent left idle, scheduler will pick up on next tick");
+      }
     }
   }
 
