@@ -320,8 +320,7 @@ describe("inbox helpers", () => {
       ],
       joinRequests: [makeJoinRequest("join-1")],
       dashboard,
-      heartbeatRuns: [
-        makeRun("run-old", "failed", "2026-03-11T00:00:00.000Z"),
+      latestFailedRuns: [
         makeRun("run-latest", "timed_out", "2026-03-11T01:00:00.000Z"),
         makeRun("run-other-agent", "failed", "2026-03-11T02:00:00.000Z", "agent-2"),
       ],
