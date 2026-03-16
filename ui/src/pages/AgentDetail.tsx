@@ -12,7 +12,7 @@ import { mergeRunLogChunks, readChunkSeq } from "../lib/run-log-chunks";
 import { getPageVisibility, usePageVisibility } from "../lib/page-visibility";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate, Link, Navigate, useBeforeUnload, type NavigateFunction } from "@/lib/router";
-import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, useInfiniteQuery, type QueryClient } from "@tanstack/react-query";
 import {
   agentsApi,
   type AgentKey,
@@ -25,6 +25,8 @@ import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { ApiError } from "../api/client";
 import { activityApi } from "../api/activity";
+import { ChartCard, RunActivityChart, SuccessRateChart, PriorityChart, IssueStatusChart } from "../components/ActivityCharts";
+import type { DashboardRunActivityDay } from "@paperclipai/shared";
 import { accessApi } from "../api/access";
 import { issuesApi } from "../api/issues";
 import { projectsApi } from "../api/projects";
@@ -923,9 +925,23 @@ export function AgentDetail() {
     enabled: Boolean(resolvedAgentId) && needsOverviewData,
   });
 
-  const { data: heartbeats } = useQuery({
+  const {
+    data: heartbeatsData,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage
+  } = useInfiniteQuery({
     queryKey: queryKeys.heartbeats(resolvedCompanyId!, agent?.id ?? undefined),
     queryFn: () => heartbeatsApi.list(resolvedCompanyId!, agent?.id ?? undefined),
+    enabled: !!resolvedCompanyId && !!agent?.id && shouldLoadHeartbeats,
+    initialPageParam: 0,
+    getNextPageParam: () => undefined,
+  });
+  const heartbeats = useMemo(() => heartbeatsData?.pages.flat() ?? [], [heartbeatsData]);
+
+  const { data: runStats } = useQuery({
+    queryKey: ["heartbeat-run-stats", resolvedCompanyId, agent?.id ?? undefined],
+    queryFn: () => heartbeatsApi.stats(resolvedCompanyId!, agent?.id ?? undefined),
     enabled: !!resolvedCompanyId && !!agent?.id && shouldLoadHeartbeats,
   });
 
@@ -1402,6 +1418,7 @@ export function AgentDetail() {
         <AgentOverview
           agent={agent}
           runs={heartbeats ?? []}
+          runStats={runStats ?? []}
           assignedIssues={assignedIssues}
           runtimeState={runtimeState}
           reportsToAgent={reportsToAgent}
@@ -1717,6 +1734,7 @@ function LatestRunCard({
 export function AgentOverview({
   agent,
   runs,
+  runStats,
   assignedIssues,
   runtimeState,
   reportsToAgent,
@@ -1726,6 +1744,7 @@ export function AgentOverview({
 }: {
   agent: AgentDetailRecord;
   runs: HeartbeatRun[];
+  runStats: import("../api/heartbeats").HeartbeatRunStats[];
   assignedIssues: Issue[];
   runtimeState?: AgentRuntimeState;
   reportsToAgent?: Agent;
@@ -1743,6 +1762,21 @@ export function AgentOverview({
     ?? asNonEmptyString(agent.runtimeConfig?.model)
     ?? "Adapter default";
   const lastRun = runs[0] ?? null;
+  const overviewRunActivity = useMemo<DashboardRunActivityDay[]>(() => {
+    const byDate = new Map<string, DashboardRunActivityDay>();
+    for (const row of runStats) {
+      let day = byDate.get(row.date);
+      if (!day) {
+        day = { date: row.date, succeeded: 0, failed: 0, recovered: 0, other: 0, total: 0, failedByErrorCode: {} };
+        byDate.set(row.date, day);
+      }
+      if (row.status === "succeeded") day.succeeded += row.count;
+      else if (row.status === "failed" || row.status === "timed_out") day.failed += row.count;
+      else day.other += row.count;
+      day.total += row.count;
+    }
+    return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }, [runStats]);
   const identity = useQuery({
     queryKey: [...queryKeys.agents.identity(agent.id), lastRun?.id, lastRun?.status],
     queryFn: () => agentsApi.getIdentity(agent.id, agent.companyId),
@@ -1758,6 +1792,22 @@ export function AgentOverview({
   return (
     <div className="space-y-6">
       <LatestRunCard runs={runs} agentId={agentRouteId} issuesById={issuesById} />
+
+{/* Charts */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <ChartCard title="Run Activity" subtitle="Last 14 days">
+          <RunActivityChart activity={overviewRunActivity} />
+        </ChartCard>
+        <ChartCard title="Tasks by Priority" subtitle="Last 14 days">
+          <PriorityChart issues={assignedIssues} />
+        </ChartCard>
+        <ChartCard title="Tasks by Status" subtitle="Last 14 days">
+          <IssueStatusChart issues={assignedIssues} />
+        </ChartCard>
+        <ChartCard title="Success Rate" subtitle="Last 14 days">
+          <SuccessRateChart activity={overviewRunActivity} />
+        </ChartCard>
+      </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <section className="rounded-lg border border-border p-4" aria-labelledby="agent-identity-heading">
@@ -1837,7 +1887,7 @@ export function AgentOverview({
             <p className="text-sm text-muted-foreground">No skills enabled.</p>
           )}
         </section>
-      </div>
+</div>
 
       <section className="space-y-3" aria-labelledby="agent-recent-tasks-heading">
         <div className="flex items-center justify-between">
@@ -3334,6 +3384,32 @@ export function RunsTab({
   adapterConfig: Record<string, unknown>;
 }) {
   const { isMobile } = useSidebar();
+  const observerTarget = useRef<HTMLDivElement>(null);
+  
+  const isFetchingRef = useRef(isFetchingNextPage);
+  isFetchingRef.current = isFetchingNextPage;
+
+  useEffect(() => {
+    if (!observerTarget.current || !hasNextPage || !fetchNextPage) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && !isFetchingRef.current) {
+          fetchNextPage();
+        }
+      },
+      { threshold: 0.1, rootMargin: "100px" }
+    );
+
+    const currentTarget = observerTarget.current;
+    observer.observe(currentTarget);
+    
+    return () => {
+      if (currentTarget) {
+        observer.unobserve(currentTarget);
+      }
+    };
+  }, [hasNextPage, fetchNextPage]);
 
   // Sort by created descending
   const sorted = [...runs].sort(
@@ -3370,10 +3446,15 @@ export function RunsTab({
       );
     }
     return (
-      <div className="border border-border rounded-lg overflow-x-hidden">
+      <div className="border border-border rounded-lg overflow-x-hidden flex flex-col">
         {sorted.map((run) => (
           <RunListItem key={run.id} run={run} isSelected={false} agentId={agentRouteId} />
         ))}
+        {hasNextPage && fetchNextPage && (
+          <div ref={observerTarget} className="p-4 flex items-center justify-center border-t border-border bg-muted/30 min-h-[50px]">
+            {isFetchingNextPage && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />}
+          </div>
+        )}
       </div>
     );
   }
@@ -3383,13 +3464,20 @@ export function RunsTab({
     <div className="flex gap-0">
       {/* Left: run list — border stretches full height, content sticks */}
       <div className={cn(
-        "shrink-0 border border-border rounded-lg",
+        "shrink-0 border border-border rounded-lg flex flex-col",
         selectedRun ? "w-72" : "w-full",
       )}>
-        <div className="sticky top-4 overflow-y-auto" style={{ maxHeight: "calc(100vh - 2rem)" }}>
-        {sorted.map((run) => (
-          <RunListItem key={run.id} run={run} isSelected={run.id === effectiveRunId} agentId={agentRouteId} />
-        ))}
+        <div className="sticky top-4 flex flex-col" style={{ maxHeight: "calc(100vh - 2rem)" }}>
+          <div className="overflow-y-auto flex-1">
+            {sorted.map((run) => (
+              <RunListItem key={run.id} run={run} isSelected={run.id === effectiveRunId} agentId={agentRouteId} />
+            ))}
+            {hasNextPage && fetchNextPage && (
+              <div ref={observerTarget} className="p-4 flex items-center justify-center border-t border-border bg-muted/30 min-h-[50px]">
+                {isFetchingNextPage && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
