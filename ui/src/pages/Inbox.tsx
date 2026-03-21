@@ -43,7 +43,6 @@ import {
   ACTIONABLE_APPROVAL_STATUSES,
   getApprovalsForTab,
   getInboxWorkItems,
-  getLatestFailedRunsByAgent,
   getRecentTouchedIssues,
   InboxApprovalFilter,
   saveLastInboxTab,
