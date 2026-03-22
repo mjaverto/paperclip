@@ -69,6 +69,25 @@ describe("parseOpenCodeJsonl", () => {
     expect(parsed.toolErrors).toEqual(["File not found: e2b-adapter-result.txt"]);
   });
 
+  it("ignores tool_use errors so they do not fail the run", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session_123",
+        part: {
+          name: "edit",
+          state: {
+            status: "error",
+            error: "Error: Could not find oldString in the file.",
+          },
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseOpenCodeJsonl(stdout);
+    expect(parsed.errorMessage).toBeNull();
+  });
+
   it("detects unknown session errors", () => {
     expect(isOpenCodeUnknownSessionError("Session not found: s_123", "")).toBe(true);
     expect(isOpenCodeUnknownSessionError("", "unknown session id")).toBe(true);
