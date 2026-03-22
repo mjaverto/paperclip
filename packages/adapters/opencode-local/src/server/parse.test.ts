@@ -82,10 +82,46 @@ describe("parseOpenCodeJsonl", () => {
           },
         },
       }),
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session_123",
+        part: {
+          name: "read",
+          state: {
+            status: "error",
+            error: "Error: Please read the file again before modifying it.",
+          },
+        },
+      }),
     ].join("\n");
 
     const parsed = parseOpenCodeJsonl(stdout);
     expect(parsed.errorMessage).toBeNull();
+  });
+
+  it("collects fatal errors even if preceded by tool_use errors", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session_123",
+        part: {
+          name: "edit",
+          state: {
+            status: "error",
+            error: "Error: Could not find oldString in the file.",
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "error",
+        sessionID: "session_123",
+        error: { message: "fatal connection error" },
+      }),
+    ].join("\n");
+
+    const parsed = parseOpenCodeJsonl(stdout);
+    expect(parsed.errorMessage).toContain("fatal connection error");
+    expect(parsed.errorMessage).not.toContain("oldString");
   });
 
   it("detects unknown session errors", () => {
