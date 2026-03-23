@@ -43,10 +43,10 @@ import {
   ACTIONABLE_APPROVAL_STATUSES,
   getApprovalsForTab,
   getInboxWorkItems,
-  getLatestFailedRunsByAgent,
   getRecentTouchedIssues,
   InboxApprovalFilter,
   saveLastInboxTab,
+  normalizeTimestamp,
   shouldShowInboxSection,
   type InboxTab,
 } from "../lib/inbox";
@@ -371,9 +371,15 @@ export function Inbox() {
     enabled: !!selectedCompanyId,
   });
 
-  const { data: heartbeatRuns, isLoading: isRunsLoading } = useQuery({
-    queryKey: queryKeys.heartbeats(selectedCompanyId!),
-    queryFn: () => heartbeatsApi.list(selectedCompanyId!),
+  const { data: latestFailedRuns, isLoading: isRunsLoading } = useQuery({
+    queryKey: [...queryKeys.heartbeats(selectedCompanyId!), "latest-failed"],
+    queryFn: () => heartbeatsApi.latestFailed(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
+  const { data: liveRuns } = useQuery({
+    queryKey: queryKeys.liveRuns(selectedCompanyId!),
+    queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
 
@@ -400,18 +406,16 @@ export function Inbox() {
   }, [issues]);
 
   const failedRuns = useMemo(
-    () => getLatestFailedRunsByAgent(heartbeatRuns ?? []).filter((r) => !dismissed.has(`run:${r.id}`)),
-    [heartbeatRuns, dismissed],
+    () => (latestFailedRuns ?? []).filter((r) => !dismissed.has(`run:${r.id}`)),
+    [latestFailedRuns, dismissed],
   );
   const liveIssueIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const run of heartbeatRuns ?? []) {
-      if (run.status !== "running" && run.status !== "queued") continue;
-      const issueId = readIssueIdFromRun(run);
-      if (issueId) ids.add(issueId);
+    for (const run of liveRuns ?? []) {
+      if (run.issueId) ids.add(run.issueId);
     }
     return ids;
-  }, [heartbeatRuns]);
+  }, [liveRuns]);
 
   const approvalsToRender = useMemo(
     () => getApprovalsForTab(approvals ?? [], tab, allApprovalFilter),
