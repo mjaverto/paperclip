@@ -182,6 +182,26 @@ describe("parseOpenCodeJsonl", () => {
     expect(parsed.costUsd).toBeGreaterThan(0);
   });
 
+  it("fails the run on permission auto-rejection tool errors", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session_999",
+        part: {
+          name: "bash",
+          state: {
+            status: "error",
+            error: "Error: permission requested: external_directory (/home/mja311/*); auto-rejecting",
+          },
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseOpenCodeJsonl(stdout);
+    expect(parsed.errorMessage).toContain("permission requested");
+    expect(parsed.errorMessage).toContain("auto-rejecting");
+  });
+
   it("detects unknown session errors", () => {
     expect(isOpenCodeUnknownSessionError("Session not found: s_123", "")).toBe(true);
     expect(isOpenCodeUnknownSessionError("", "unknown session id")).toBe(true);
