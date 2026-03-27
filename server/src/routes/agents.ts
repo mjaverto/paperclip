@@ -670,8 +670,8 @@ export function agentRoutes(db: Db) {
     const agentId = typeof req.query.agentId === "string" ? req.query.agentId : undefined;
     let command: string | undefined;
     if (agentId) {
-      const agent = await svc.getById(companyId, agentId);
-      if (agent?.adapterConfig && typeof agent.adapterConfig.command === "string") {
+      const agent = await svc.getById(agentId);
+      if (agent && agent.companyId === companyId && agent.adapterConfig && typeof agent.adapterConfig.command === "string") {
         command = agent.adapterConfig.command;
       }
     }
