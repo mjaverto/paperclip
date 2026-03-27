@@ -16,6 +16,12 @@ describe("openCode models", () => {
     await expect(listOpenCodeModels()).resolves.toEqual([]);
   });
 
+  it("uses command option when provided", async () => {
+    await expect(
+      listOpenCodeModels({ command: "__paperclip_missing_opencode_command__" }),
+    ).resolves.toEqual([]);
+  });
+
   it("rejects when model is missing", async () => {
     await expect(
       ensureOpenCodeModelConfiguredAndAvailable({ model: "" }),
