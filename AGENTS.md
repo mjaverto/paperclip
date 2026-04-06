@@ -199,3 +199,8 @@ PR #2218 (`feat/external-adapter-phase1`) adds external adapter support. See roo
 - `createServerAdapter()` must include ALL optional fields (especially `detectModel`)
 - Built-in UI adapters can shadow external plugin parsers — remove built-in when fully externalizing
 - Reference external adapters: Hermes (`@henkey/hermes-paperclip-adapter` or `file:`) and Droid (npm)
+
+## Learnings
+
+- 2026-03-15: When using Drizzle `db.execute` for raw SQL in this repo, ensure you test the return type (it may return raw rows directly instead of a `QueryResult` object with a `.rows` property depending on the database driver).
+- 2026-03-15: When implementing `IntersectionObserver` for infinite scrolling with React Query, ensure `isFetchingNextPage` is checked inside the callback but NOT included in the React `useEffect` dependency array, otherwise it causes an infinite fetch loop.

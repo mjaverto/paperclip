@@ -120,9 +120,9 @@ export function useInboxBadge(companyId: string | null | undefined) {
 
   const mineIssues = useMemo(() => getRecentTouchedIssues(mineIssuesRaw), [mineIssuesRaw]);
 
-  const { data: heartbeatRuns = [] } = useQuery({
-    queryKey: queryKeys.heartbeats(companyId!),
-    queryFn: () => heartbeatsApi.list(companyId!),
+  const { data: latestFailedRuns = [] } = useQuery({
+    queryKey: [...queryKeys.heartbeats(companyId!), "latest-failed"],
+    queryFn: () => heartbeatsApi.latestFailed(companyId!),
     enabled: !!companyId,
   });
 
@@ -132,10 +132,10 @@ export function useInboxBadge(companyId: string | null | undefined) {
         approvals,
         joinRequests,
         dashboard,
-        heartbeatRuns,
-        mineIssues,
+        latestFailedRuns,
+        unreadIssues,
         dismissed,
       }),
-    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, dismissed],
+    [approvals, joinRequests, dashboard, latestFailedRuns, unreadIssues, dismissed],
   );
 }
