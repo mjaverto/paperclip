@@ -199,6 +199,35 @@ describe("loadCodexModels — cache path", () => {
     expect(models.some((m) => m.id === "codex-from-env-dir")).toBe(true);
   });
 
+  it("re-reads codex cache on refresh instead of using stale file data", async () => {
+    process.env.CODEX_HOME = tmpDir;
+    const cacheFile = path.join(tmpDir, "models_cache.json");
+    fs.writeFileSync(
+      cacheFile,
+      JSON.stringify({
+        models: [
+          { slug: "codex-cache-before-refresh", display_name: "Before Refresh", visibility: "list" },
+        ],
+      }),
+    );
+
+    const initial = await listAdapterModels("codex_local");
+    fs.writeFileSync(
+      cacheFile,
+      JSON.stringify({
+        models: [
+          { slug: "codex-cache-after-refresh", display_name: "After Refresh", visibility: "list" },
+        ],
+      }),
+    );
+
+    const refreshed = await refreshAdapterModels("codex_local");
+
+    expect(initial.some((m) => m.id === "codex-cache-before-refresh")).toBe(true);
+    expect(refreshed.some((m) => m.id === "codex-cache-after-refresh")).toBe(true);
+    expect(refreshed.some((m) => m.id === "codex-cache-before-refresh")).toBe(false);
+  });
+
   it("returns static fallback models when cache file is missing, without throwing", async () => {
     // tmpDir has no models_cache.json — simulates missing cache
     process.env.CODEX_HOME = tmpDir;
