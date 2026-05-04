@@ -169,7 +169,7 @@ export function budgetPoliciesForRun(companyId: string, agentId: string | null, 
 }
 
 type SpendPolicy = Pick<PolicyRow, "companyId" | "scopeType" | "scopeId" | "windowKind" | "metric">;
-type ObservedSpend = { windowStart: Date; windowEnd: Date; total: number; totalExact: string; unpricedEventCount: number; pendingRunCount: number; recoveringRunCount: number };
+type ObservedSpend = { windowStart: Date; windowEnd: Date; total: number; totalExact: string; unpricedEventCount: number; unpricedRunCount: number; pendingRunCount: number; recoveringRunCount: number };
 
 /** One ledger scan and one pending-run scan for the affected policies. The
  * company lock still protects decisions; nothing is cached across mutations.
@@ -201,6 +201,7 @@ async function computeObservedSpends(db: Db, policies: SpendPolicy[]): Promise<O
     ledgerPredicates.push(ledger); pendingPredicates.push(pending);
     ledgerColumns[`total${index}`] = sql`coalesce(sum(${costEvents.costCents}) filter (where ${ledger}), 0)::text`;
     ledgerColumns[`unpriced${index}`] = sql`count(*) filter (where ${ledger} and ${costEvents.costStatus} = 'unpriced' and ${costEvents.billingType} <> 'subscription_included')::int`;
+    ledgerColumns[`unpricedRuns${index}`] = sql`count(*) filter (where ${ledger} and ${costEvents.costCents} is null)::int`;
     pendingColumns[`pending${index}`] = sql`count(*) filter (where ${pending})::int`;
     pendingColumns[`recovering${index}`] = sql`count(*) filter (where ${pending} and ${heartbeatRuns.runtimeMode} = 'native'
       and exists (select 1 from ${nativeRunFinalizations} where ${nativeRunFinalizations.runId} = ${heartbeatRuns.id}
@@ -212,7 +213,7 @@ async function computeObservedSpends(db: Db, policies: SpendPolicy[]): Promise<O
   return policies.map((_, index) => ({
     windowStart: windows[index].start, windowEnd: windows[index].end,
     total: Number(ledger[`total${index}`] ?? 0), totalExact: normalizeCents(String(ledger[`total${index}`] ?? 0)),
-    unpricedEventCount: Number(ledger[`unpriced${index}`] ?? 0), pendingRunCount: Number(pending[`pending${index}`] ?? 0),
+    unpricedEventCount: Number(ledger[`unpriced${index}`] ?? 0), unpricedRunCount: Number(ledger[`unpricedRuns${index}`] ?? 0), pendingRunCount: Number(pending[`pending${index}`] ?? 0),
     recoveringRunCount: Number(pending[`recovering${index}`] ?? 0),
   }));
 }
@@ -369,7 +370,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
   async function buildPolicySummary(policy: PolicyRow): Promise<BudgetPolicySummary> {
     const scope = await resolveScopeRecord(db, policy.scopeType as BudgetScopeType, policy.scopeId);
     const observed = await computeObservedSpend(db, policy);
-    const { total: observedAmount, totalExact: observedAmountExact, unpricedEventCount, pendingRunCount } = observed;
+    const { total: observedAmount, totalExact: observedAmountExact, unpricedEventCount, unpricedRunCount, pendingRunCount } = observed;
     const { windowStart: start, windowEnd: end } = observed;
     const amount = policy.isActive ? policy.amount : 0;
     const utilizationPercent =
@@ -402,9 +403,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       pauseReason: scope.pauseReason,
       windowStart: start,
       windowEnd: end,
-      // Lane D will populate this from the cost_events aggregate. Default to 0
-      // so the type compiles before the aggregation is wired up.
-      unpricedRunCount: 0,
+      unpricedRunCount,
     };
   }
 
@@ -770,8 +769,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         pausedAgentCount: new Set(policies.filter((policy) => policy.scopeType === "agent" && policy.paused).map((policy) => policy.scopeId)).size,
         pausedProjectCount: new Set(policies.filter((policy) => policy.scopeType === "project" && policy.paused).map((policy) => policy.scopeId)).size,
         pendingApprovalCount: activeIncidents.filter((incident) => incident.approvalStatus === "pending").length,
-        // Sum of per-policy unpriced counts. Lane D will populate the per-policy
-        // values from the cost_events aggregate; until then this is 0.
+        // Sum of per-policy unpriced counts (cost_events.cost_cents IS NULL).
         unpricedRunCount: policies.reduce((sum, policy) => sum + (policy.unpricedRunCount ?? 0), 0),
       };
     },

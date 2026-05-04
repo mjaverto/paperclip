@@ -1,4 +1,5 @@
-import { usdToUnits, unitsToCents } from "@paperclipai/shared";
+import { usdToUnits, unitsToCents, centsToUnits } from "@paperclipai/shared";
+import { priceUsd } from "@paperclipai/pricing";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { accountingRuntimeBaselines, budgetReservations, agentRuntimeState, agents, costEvents, heartbeatRuns, nativeRunFinalizations, issues, projects, type Db } from "@paperclipai/db";
 import { withAccountingTransaction } from "./accounting-transaction.js";
@@ -8,6 +9,24 @@ import { budgetService, deliverBudgetEnforcement, type BudgetServiceHooks } from
 import { logger } from "../middleware/logger.js";
 import { promises as fs } from "node:fs";
 import { replayUsageReceipts, indexPendingUsageReceipts, recoverPendingRunUsageReceipts, type UsageReceiptIndex } from "./usage-receipts.js";
+
+/** Fork pricing fallback: when the receipt carries no cost but tokens exist,
+ * look the model up in the vendored catalog. Returns cents or null (unpriced). */
+function pricingFallbackCents(usage: Record<string, unknown>, billingType: string): number | null {
+  const provider = text(usage.provider);
+  const model = text(usage.model);
+  if (!provider || provider === "unknown" || !model) return null;
+  const usd = priceUsd({
+    provider,
+    model,
+    inputTokens: Math.max(0, Math.floor(amount(usage.inputTokens) ?? 0)),
+    outputTokens: Math.max(0, Math.floor(amount(usage.outputTokens) ?? 0)),
+    cachedInputTokens: Math.max(0, Math.floor(amount(usage.cachedInputTokens) ?? 0)),
+    reasoningTokens: Math.max(0, Math.floor(amount(usage.reasoningTokens) ?? 0)),
+    billingType,
+  });
+  return typeof usd === "number" && Number.isFinite(usd) ? Math.max(0, Math.round(usd * 100)) : null;
+}
 
 const terminalStatuses = ["succeeded", "failed", "timed_out", "cancelled", "interrupted"];
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -83,8 +102,21 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
     }
     const costUsd = amount(usage.cacheAdjustedCostUsd) ?? text(usage.costUsdExact) ?? amount(usage.costUsd);
     const billingType = text(usage.billingType) ?? "unknown";
-    const costUnits = billingType === "subscription_included" ? 0n : usdToUnits(costUsd ?? 0);
-    const costCents = unitsToCents(costUnits);
+    // Fork unpriced semantics: when no receipt cost exists, try the vendor catalog
+    // before giving up. A null result lands as cost_events.cost_cents = NULL and
+    // the unpriced aggregates (BudgetPolicySummary.unpricedRunCount) surface it.
+    const pricingCents = costUsd === null && billingType !== "subscription_included"
+      ? pricingFallbackCents(usage, billingType)
+      : null;
+    const costUnits = billingType === "subscription_included"
+      ? 0n
+      : costUsd !== null
+        ? usdToUnits(costUsd)
+        : pricingCents !== null ? centsToUnits(pricingCents) : 0n;
+    const hasPricedCost = costUsd !== null || pricingCents !== null;
+    const costCents: number | null = !hasPricedCost && billingType !== "subscription_included"
+      ? null
+      : Number(unitsToCents(costUnits));
     const [agent] = await tx.select({ adapterType: agents.adapterType }).from(agents).where(eq(agents.id, run.agentId));
     const hasBillableEvidence = agent?.adapterType !== "process" || costUsd !== null || usage.costStatus === "unpriced"
       || ["inputTokens", "cachedInputTokens", "outputTokens"].some(key => (amount(usage[key]) ?? 0) > 0)

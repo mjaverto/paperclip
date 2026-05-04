@@ -30,6 +30,13 @@ function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.inp
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
 }
 
+// Count cost_events whose cost_cents is NULL — i.e. the heartbeat fallback could
+// not price the run. Surfaced alongside every cost aggregate so the UI can show
+// "$X.YZ + N unpriced" instead of silently undercounting.
+function unpricedRunCount() {
+  return sql<number>`count(*) filter (where ${costEvents.costCents} is null)::int`;
+}
+
 function currentUtcMonthWindow(now = new Date()) {
   const year = now.getUTCFullYear();
   const month = now.getUTCMonth();
@@ -82,8 +89,13 @@ export async function getMonthlySpendTotal(
   return Number(row?.total ?? 0);
 }
 
-export async function createCostEventInTransaction(db: Db, companyId: string, data: Omit<typeof costEvents.$inferInsert, "companyId" | "receiptHash" | "costCents"> & { costCents: MoneyInput }, publications: ActivityPublication[] = [], actor?: Pick<LogActivityInput, "actorType" | "actorId" | "agentId">) {
-  const parsed = ((data.usageKind === "decision" || data.usageKind === "fast_response") ? createServiceCostEventSchema : createCostEventSchema).safeParse({ ...data, occurredAt: data.occurredAt.toISOString() });
+export async function createCostEventInTransaction(db: Db, companyId: string, data: Omit<typeof costEvents.$inferInsert, "companyId" | "receiptHash" | "costCents"> & { costCents: MoneyInput | null }, publications: ActivityPublication[] = [], actor?: Pick<LogActivityInput, "actorType" | "actorId" | "agentId">) {
+  // Fork unpriced semantics: cost_cents may be null. Validate with a stand-in 0,
+  // then restore the null so the row lands NULL and aggregates count it as unpriced.
+  const costCentsIsNull = data.costCents === null || data.costCents === undefined;
+  const parsed = ((data.usageKind === "decision" || data.usageKind === "fast_response") ? createServiceCostEventSchema : createCostEventSchema).safeParse({
+    ...data, occurredAt: data.occurredAt.toISOString(), ...(costCentsIsNull ? { costCents: 0 } : {}),
+  });
   if (!parsed.success) throw unprocessable("Invalid cost receipt", parsed.error.flatten());
   const values = {
     ...parsed.data,
@@ -93,15 +105,15 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
     heartbeatRunId: parsed.data.heartbeatRunId ?? null,
     billingCode: parsed.data.billingCode ?? null,
     idempotencyKey: parsed.data.idempotencyKey ?? null,
-    costCents: normalizeCents(parsed.data.costCents),
+    costCents: costCentsIsNull ? null : normalizeCents(parsed.data.costCents),
     occurredAt: new Date(parsed.data.occurredAt),
-  };
+  } as typeof parsed.data & typeof costEvents.$inferInsert;
   const receiptHash = receiptFingerprint(values);
   // Older receipts hashed the numeric API value. Retain replay compatibility
   // only when the decimal value survives that representation exactly.
   let legacyHash: string | null = null;
   try {
-    if (normalizeCents(Number(values.costCents)) === values.costCents) legacyHash = receiptFingerprint({ ...values, costCents: Number(values.costCents) });
+    if (!costCentsIsNull && normalizeCents(Number(values.costCents)) === values.costCents) legacyHash = receiptFingerprint({ ...values, costCents: Number(values.costCents) });
   } catch { /* The legacy number may round beyond the decimal storage limit. */ }
   if (values.idempotencyKey) {
     const [existing] = await db.select().from(costEvents).where(and(
@@ -110,7 +122,7 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
     if (existing) {
       if (existing.receiptHash !== receiptHash && existing.receiptHash !== legacyHash) throw conflict("Idempotency key already used for a different cost receipt");
       const [exact] = await db.select({ costCents: sql<string>`${costEvents.costCents}::text` }).from(costEvents).where(eq(costEvents.id, existing.id));
-      return { ...existing, costCentsExact: normalizeCents(exact.costCents) };
+      return { ...existing, costCentsExact: exact.costCents === null ? normalizeCents(0) : normalizeCents(exact.costCents) };
     }
   }
   const links = [
@@ -136,8 +148,8 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
   }
   // Server-derived attribution stays outside the immutable receipt fingerprint;
   // replaying a receipt must not depend on later account metadata changes.
-  const [event] = await db.insert(costEvents).values({ ...values, subscriptionId, costCents: sql`${values.costCents}::numeric`, reportedCostCents: values.costCents, id: data.id, companyId, receiptHash }).returning();
-  await updateMonthlySpendProjections(db, companyId, event.agentId, values.costCents, event.occurredAt);
+  const [event] = await db.insert(costEvents).values({ ...values, subscriptionId, costCents: values.costCents === null ? null : sql`${values.costCents}::numeric`, reportedCostCents: values.costCents, id: data.id, companyId, receiptHash }).returning();
+  if (values.costCents !== null) await updateMonthlySpendProjections(db, companyId, event.agentId, values.costCents, event.occurredAt);
   // Separately reported charges linked to an already-accounted run contribute
   // to lifetime totals too. Before acknowledgement, accountRunCost includes
   // all of the run's events atomically when it initializes the projection.
@@ -145,7 +157,7 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
     const [run] = await db.select({ acknowledged: heartbeatRuns.costAccountedAt, version: heartbeatRuns.accountingProjectionVersion })
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, event.heartbeatRunId), eq(heartbeatRuns.companyId, companyId)));
     if (run.acknowledged && run.version === "v2") await db.update(agentRuntimeState).set({
-      totalCostCents: sql`${agentRuntimeState.totalCostCents} + ${values.costCents}::numeric`,
+      totalCostCents: sql`${agentRuntimeState.totalCostCents} + coalesce(${values.costCents as string | number | null}::numeric, 0)`,
       totalInputTokens: sql`${agentRuntimeState.totalInputTokens} + ${event.inputTokens}`,
       totalCachedInputTokens: sql`${agentRuntimeState.totalCachedInputTokens} + ${event.cachedInputTokens}`,
       totalOutputTokens: sql`${agentRuntimeState.totalOutputTokens} + ${event.outputTokens}`,
@@ -159,7 +171,7 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
     runId: event.heartbeatRunId, action: "cost.reported", entityType: "cost_event", entityId: event.id,
     details: { costCents: event.costCents, costCentsExact: values.costCents, model: event.model, costStatus: event.costStatus },
   }, publications);
-  return { ...event, costCentsExact: values.costCents };
+  return { ...event, costCentsExact: values.costCents === null ? normalizeCents(0) : values.costCents };
 }
 
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
@@ -186,7 +198,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
       if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
 
-      const [{ total, totalExact, eventCount, unpricedEventCount, estimatedEventCount, unknownBillingEventCount }] = await db
+      const [{ total, totalExact, eventCount, unpricedEventCount, estimatedEventCount, unknownBillingEventCount, unpricedRunCount }] = await db
         .select({
           eventCount: sql<number>`count(*)::int`,
           estimatedEventCount: sql<number>`count(*) filter (where ${costEvents.costStatus} = 'estimated')::int`,
@@ -194,6 +206,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           unpricedEventCount: sql<number>`count(*) filter (where ${costEvents.costStatus} = 'unpriced' and ${costEvents.billingType} <> 'subscription_included')::int`,
           total: sumAsNumber(costEvents.costCents),
           totalExact: sql<string>`coalesce(sum(${costEvents.costCents}), 0)::text`,
+          unpricedRunCount: unpricedRunCount(),
         })
         .from(costEvents)
         .where(and(...conditions));
@@ -222,6 +235,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         spendCentsExact: normalizeCents(totalExact),
         budgetCents: company.budgetMonthlyCents,
         utilizationPercent: Number(utilization.toFixed(2)),
+        unpricedRunCount,
       };
     }),
 
@@ -458,6 +472,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           inputTokens: sumAsNumber(ordinaryInputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
+          unpricedRunCount: unpricedRunCount(),
           apiRunCount:
             sql<number>`count(distinct case when ${costEvents.billingType} = ${METERED_BILLING_TYPE} then ${costEvents.heartbeatRunId} end)::int`,
           subscriptionRunCount:
@@ -500,6 +515,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           inputTokens: sumAsNumber(ordinaryInputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
+          unpricedRunCount: unpricedRunCount(),
           apiRunCount:
             sql<number>`count(distinct case when ${costEvents.billingType} = ${METERED_BILLING_TYPE} then ${costEvents.heartbeatRunId} end)::int`,
           subscriptionRunCount:
@@ -534,6 +550,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           inputTokens: sumAsNumber(ordinaryInputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
+          unpricedRunCount: unpricedRunCount(),
           apiRunCount:
             sql<number>`count(distinct case when ${costEvents.billingType} = ${METERED_BILLING_TYPE} then ${costEvents.heartbeatRunId} end)::int`,
           subscriptionRunCount:
@@ -578,6 +595,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
               inputTokens: sumAsNumber(ordinaryInputTokens),
               cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
               outputTokens: sumAsNumber(costEvents.outputTokens),
+              unpricedRunCount: unpricedRunCount(),
             })
             .from(costEvents)
             .where(
@@ -600,6 +618,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
             inputTokens: row.inputTokens,
             cachedInputTokens: row.cachedInputTokens,
             outputTokens: row.outputTokens,
+            unpricedRunCount: row.unpricedRunCount,
           }));
         }),
       );
@@ -633,6 +652,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           inputTokens: sumAsNumber(ordinaryInputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
+          unpricedRunCount: unpricedRunCount(),
         })
         .from(costEvents)
         .leftJoin(agents, eq(costEvents.agentId, agents.id))
@@ -699,6 +719,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           inputTokens: sumAsNumber(ordinaryInputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
+          unpricedRunCount: unpricedRunCount(),
         })
         .from(costEvents)
         .leftJoin(runProjectLinks, eq(costEvents.heartbeatRunId, runProjectLinks.runId))
