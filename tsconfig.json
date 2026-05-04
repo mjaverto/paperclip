@@ -6,6 +6,7 @@
     { "path": "./packages/google-sheets-mcp-server" },
     { "path": "./packages/mcp-server" },
     { "path": "./packages/shared" },
+    { "path": "./packages/pricing" },
     { "path": "./packages/db" },
     { "path": "./packages/adapters/claude-local" },
     { "path": "./packages/adapters/codex-local" },
