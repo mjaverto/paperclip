@@ -33,7 +33,12 @@ export function asFiniteNumber(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-export function formatCents(cents: number, currency = "USD"): string {
+export function formatCents(
+  cents: number | null | undefined,
+  opts?: { nullDisplay?: string; currency?: string },
+): string {
+  if (cents == null) return opts?.nullDisplay ?? "—";
+  const currency = opts?.currency ?? "USD";
   // Older finance writes accepted arbitrary three-character codes. Keep those
   // amounts readable without passing an invalid currency to Intl.
   if (!/^[a-z]{3}$/i.test(currency)) {
@@ -216,10 +221,10 @@ export function visibleRunTokenTotal(usage: Record<string, unknown> | null | und
 export function visibleRunCostUsd(
   usage: Record<string, unknown> | null,
   result: Record<string, unknown> | null = null,
-): number {
+): number | null {
   const billingType = coerceBillingType(usage?.billingType) ?? coerceBillingType(result?.billingType);
   if (billingType === "subscription_included") return 0;
-  return readRunCostUsd(usage) ?? readRunCostUsd(result) ?? 0;
+  return readRunCostUsd(usage) ?? readRunCostUsd(result);
 }
 
 export function financeEventKindDisplayName(eventKind: FinanceEventKind): string {
