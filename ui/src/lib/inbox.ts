@@ -210,13 +210,19 @@ export function getLatestFailedRunsByAgent(runs: HeartbeatRun[]): HeartbeatRun[]
   return Array.from(latestByAgent.values()).filter((run) => FAILED_RUN_STATUSES.has(run.status));
 }
 
+export function computeInboxBadgeData({
+  approvals,
+  joinRequests,
+  dashboard,
+  latestFailedRuns,
+  mineIssues,
   dismissed,
 }: {
   approvals: Approval[];
   joinRequests: JoinRequest[];
   dashboard: DashboardSummary | undefined;
   latestFailedRuns: HeartbeatRun[];
-  unreadIssues: Issue[];
+  mineIssues: Issue[];
   dismissed: Set<string>;
 }): InboxBadgeData {
   const actionableApprovals = approvals.filter(

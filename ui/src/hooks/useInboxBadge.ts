@@ -133,9 +133,9 @@ export function useInboxBadge(companyId: string | null | undefined) {
         joinRequests,
         dashboard,
         latestFailedRuns,
-        unreadIssues,
+        mineIssues,
         dismissed,
       }),
-    [approvals, joinRequests, dashboard, latestFailedRuns, unreadIssues, dismissed],
+    [approvals, joinRequests, dashboard, latestFailedRuns, mineIssues, dismissed],
   );
 }

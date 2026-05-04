@@ -7,8 +7,30 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+export function asObject(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+export function asBoolean(value: unknown, fallback: boolean) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+export function asFiniteNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+export function formatCents(
+  cents: number | null | undefined,
+  opts?: { nullDisplay?: string },
+): string {
+  if (cents == null) return opts?.nullDisplay ?? "—";
+  return `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+export function formatNumber(n: number): string {
+  return n.toLocaleString("en-US");
 }
 
 export function formatDate(date: Date | string): string {
@@ -29,6 +51,13 @@ export function formatDateTime(date: Date | string): string {
   });
 }
 
+export function formatShortDate(date: Date | string): string {
+  return new Date(date).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export function relativeTime(date: Date | string): string {
   const now = Date.now();
   const then = new Date(date).getTime();
@@ -44,6 +73,7 @@ export function relativeTime(date: Date | string): string {
 }
 
 export function formatTokens(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
@@ -53,6 +83,7 @@ export function formatTokens(n: number): string {
 export function providerDisplayName(provider: string): string {
   const map: Record<string, string> = {
     anthropic: "Anthropic",
+    aws_bedrock: "AWS Bedrock",
     openai: "OpenAI",
     openrouter: "OpenRouter",
     chatgpt: "ChatGPT",
@@ -79,6 +110,7 @@ export function quotaSourceDisplayName(source: string): string {
   const map: Record<string, string> = {
     "anthropic-oauth": "Anthropic OAuth",
     "claude-cli": "Claude CLI",
+    "bedrock": "AWS Bedrock",
     "codex-rpc": "Codex app server",
     "codex-wham": "ChatGPT WHAM",
   };
@@ -99,22 +131,22 @@ function coerceBillingType(value: unknown): BillingType | null {
   return null;
 }
 
-function readRunCostUsd(payload: Record<string, unknown> | null): number {
-  if (!payload) return 0;
+function readRunCostUsd(payload: Record<string, unknown> | null): number | null {
+  if (!payload) return null;
   for (const key of ["costUsd", "cost_usd", "total_cost_usd"] as const) {
     const value = payload[key];
     if (typeof value === "number" && Number.isFinite(value)) return value;
   }
-  return 0;
+  return null;
 }
 
 export function visibleRunCostUsd(
   usage: Record<string, unknown> | null,
   result: Record<string, unknown> | null = null,
-): number {
+): number | null {
   const billingType = coerceBillingType(usage?.billingType) ?? coerceBillingType(result?.billingType);
   if (billingType === "subscription_included") return 0;
-  return readRunCostUsd(usage) || readRunCostUsd(result);
+  return readRunCostUsd(usage) ?? readRunCostUsd(result);
 }
 
 export function financeEventKindDisplayName(eventKind: FinanceEventKind): string {

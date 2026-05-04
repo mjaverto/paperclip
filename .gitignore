@@ -1,5 +1,9 @@
+node_modules
 node_modules/
+**/node_modules
+**/node_modules/
 dist/
+ui/storybook-static/
 .env
 *.tsbuildinfo
 drizzle/meta/
@@ -8,6 +12,8 @@ coverage/
 .DS_Store
 **/._.DS_Store
 data/
+!packages/pricing/data/
+!packages/pricing/data/**
 .paperclip/
 .pnpm-store/
 tmp-*
@@ -33,6 +39,7 @@ server/src/**/*.d.ts
 server/src/**/*.d.ts.map
 tmp/
 feedback-export-*
+diagnostics/
 
 # Editor / tool temp files
 *.tmp
