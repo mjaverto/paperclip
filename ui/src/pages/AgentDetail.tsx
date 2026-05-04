@@ -26,6 +26,7 @@ import { instanceSettingsApi } from "../api/instanceSettings";
 import { ApiError } from "../api/client";
 import { activityApi } from "../api/activity";
 import { ChartCard, RunActivityChart, SuccessRateChart, PriorityChart, IssueStatusChart } from "../components/ActivityCharts";
+import { CostCell } from "../components/CostCell";
 import type { DashboardRunActivityDay } from "@paperclipai/shared";
 import { accessApi } from "../api/access";
 import { issuesApi } from "../api/issues";
@@ -78,7 +79,7 @@ import { Tabs } from "@/components/ui/tabs";
 import { PageTabBar } from "../components/PageTabBar";
 import { AuditFeed } from "./audit/AuditFeed";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import {
   CheckCircle2,
   XCircle,
@@ -100,7 +101,6 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { RunTranscriptView, type TranscriptMode } from "../components/transcript/RunTranscriptView";
 import { AgentToolsTab } from "./AgentToolsTab";
@@ -382,9 +382,10 @@ function runMetrics(run: HeartbeatRun) {
     "cached_input_tokens",
     "cache_read_input_tokens",
   );
-  // Coerce null → 0 to preserve historical aggregate behavior; tri-state
-  // rendering at user-facing surfaces is owned by lane E3.
-  const cost = visibleRunCostUsd(usage, result) ?? 0;
+  // Preserve null so user-facing surfaces (lane E3) can render the tri-state:
+  // priced → "$X.XX", 0 → "$0.00" (genuinely free), null → "unpriced" pill.
+  // Aggregate/filter call sites that need numeric behavior coalesce explicitly.
+  const cost = visibleRunCostUsd(usage, result);
   const provider = asNonEmptyString(usage?.provider) ?? null;
   const model = asNonEmptyString(usage?.model) ?? null;
   return {
@@ -1969,10 +1970,103 @@ export function AgentOverview({
           ))}
         </div>
       </section>
+      {/* Costs */}
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium">Costs</h3>
+        <CostsSection runtimeState={runtimeState} runs={runs} />
+      </div>
     </div>
   );
 }
 
+/* ---- Costs Section (inline) ---- */
+
+function CostsSection({
+  runtimeState,
+  runs,
+}: {
+  runtimeState?: AgentRuntimeState;
+  runs: HeartbeatRun[];
+}) {
+  const runsWithCost = runs
+    .filter((r) => {
+      const metrics = runMetrics(r);
+      return (metrics.cost ?? 0) > 0 || metrics.input > 0 || metrics.output > 0 || metrics.cached > 0;
+    })
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  return (
+    <div className="space-y-4">
+      {runtimeState && (
+        <div className="border border-border rounded-lg p-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 tabular-nums">
+            <div>
+              <span className="text-xs text-muted-foreground block">Input tokens</span>
+              <span className="text-lg font-semibold">{formatTokens(runtimeState.totalInputTokens)}</span>
+            </div>
+            <div>
+              <span className="text-xs text-muted-foreground block">Output tokens</span>
+              <span className="text-lg font-semibold">{formatTokens(runtimeState.totalOutputTokens)}</span>
+            </div>
+            <div>
+              <span className="text-xs text-muted-foreground block">Cached tokens</span>
+              <span className="text-lg font-semibold">{formatTokens(runtimeState.totalCachedInputTokens)}</span>
+            </div>
+            <div>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="text-xs text-muted-foreground block cursor-help underline decoration-dotted underline-offset-2">
+                      Total cost
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" sideOffset={4} className="max-w-xs">
+                    Since agent creation, including pre-pricing-service rows. May differ from Budget Observed.
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <span className="text-lg font-semibold">{formatCents(runtimeState.totalCostCents)}</span>
+              <span className="text-[10px] text-muted-foreground block mt-0.5">
+                since agent creation
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+      {runsWithCost.length > 0 && (
+        <div className="border border-border rounded-lg overflow-hidden">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border bg-accent/20">
+                <th className="text-left px-3 py-2 font-medium text-muted-foreground">Date</th>
+                <th className="text-left px-3 py-2 font-medium text-muted-foreground">Run</th>
+                <th className="text-right px-3 py-2 font-medium text-muted-foreground">Input</th>
+                <th className="text-right px-3 py-2 font-medium text-muted-foreground">Output</th>
+                <th className="text-right px-3 py-2 font-medium text-muted-foreground">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runsWithCost.slice(0, 10).map((run) => {
+                const metrics = runMetrics(run);
+                return (
+                  <tr key={run.id} className="border-b border-border last:border-b-0">
+                    <td className="px-3 py-2">{formatDate(run.createdAt)}</td>
+                    <td className="px-3 py-2 font-mono">{run.id.slice(0, 8)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(metrics.input)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(metrics.output)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {metrics.cost == null
+                        ? <CostCell cents={null} unpricedFallback="unpriced" />
+                        : `$${metrics.cost.toFixed(4)}`
+                      }
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 /* ---- Agent Configure Page ---- */
 
 /**
@@ -3393,7 +3487,11 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
       {(metrics.totalTokens > 0 || metrics.cost > 0) && (
         <div className="flex items-center gap-2 pl-5.5 text-(length:--text-micro) text-muted-foreground tabular-nums">
           {metrics.totalTokens > 0 && <span>{formatTokens(metrics.totalTokens)} tok</span>}
-          {metrics.cost > 0 && <span>${metrics.cost.toFixed(3)}</span>}
+          {metrics.cost == null
+            ? <span className="italic" aria-label="cost not available">unpriced</span>
+            : metrics.cost > 0
+              ? <span>${metrics.cost.toFixed(3)}</span>
+              : null}
         </div>
       )}
     </Link>
@@ -3741,7 +3839,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
     ? Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)
     : null;
   const displayDurationSec = durationSec ?? (isRunning ? elapsedSec : null);
-  const hasMetrics = metrics.input > 0 || metrics.output > 0 || metrics.cached > 0 || metrics.cost > 0;
+  const hasMetrics = metrics.input > 0 || metrics.output > 0 || metrics.cached > 0 || metrics.cost == null || (metrics.cost ?? 0) > 0;
   const hasSession = !!(run.sessionIdBefore || run.sessionIdAfter);
   const sessionChanged = run.sessionIdBefore && run.sessionIdAfter && run.sessionIdBefore !== run.sessionIdAfter;
   const sessionId = run.sessionIdAfter || run.sessionIdBefore;
@@ -3997,7 +4095,13 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
               </div>
               <div>
                 <div className="text-xs text-muted-foreground">Cost</div>
-                <div className="text-sm font-medium font-mono">{metrics.cost > 0 ? `$${metrics.cost.toFixed(4)}` : "-"}</div>
+                <div className="text-sm font-medium font-mono">
+                  {metrics.cost == null
+                    ? <CostCell cents={null} unpricedFallback="unpriced" />
+                    : metrics.cost > 0
+                      ? `$${metrics.cost.toFixed(4)}`
+                      : "-"}
+                </div>
               </div>
             </div>
           )}
