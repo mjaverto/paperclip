@@ -35,7 +35,7 @@ export const costEvents = pgTable(
     inputTokens: integer("input_tokens").notNull().default(0),
     cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
-    costCents: numeric("cost_cents", { precision: 24, scale: 7, mode: "number" }).notNull(),
+    costCents: numeric("cost_cents", { precision: 24, scale: 7, mode: "number" }),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
