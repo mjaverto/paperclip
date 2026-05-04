@@ -26,6 +26,12 @@ export interface CostSummary {
   spendCents: number;
   budgetCents: number;
   utilizationPercent: number;
+  /**
+   * Count of runs whose cost could not be priced (adapter returned no costUsd
+   * and the pricing service had no entry for the model). Defaults to 0 for
+   * backwards compatibility with consumers that pre-date the pricing service.
+   */
+  unpricedRunCount: number;
 }
 
 export interface IssueCostSummary {
@@ -56,6 +62,8 @@ export interface CostByAgent {
   subscriptionCachedInputTokens: number;
   subscriptionInputTokens: number;
   subscriptionOutputTokens: number;
+  /** runs in this group whose cost could not be priced. defaults to 0. */
+  unpricedRunCount: number;
 }
 
 export interface CostByProviderModel {
@@ -72,6 +80,8 @@ export interface CostByProviderModel {
   subscriptionCachedInputTokens: number;
   subscriptionInputTokens: number;
   subscriptionOutputTokens: number;
+  /** runs in this group whose cost could not be priced. defaults to 0. */
+  unpricedRunCount: number;
 }
 
 export interface CostByBiller {
@@ -87,6 +97,8 @@ export interface CostByBiller {
   subscriptionOutputTokens: number;
   providerCount: number;
   modelCount: number;
+  /** runs in this group whose cost could not be priced. defaults to 0. */
+  unpricedRunCount: number;
 }
 
 /** per-agent breakdown by provider + model, for identifying token-hungry agents */
@@ -101,6 +113,8 @@ export interface CostByAgentModel {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  /** runs in this group whose cost could not be priced. defaults to 0. */
+  unpricedRunCount: number;
 }
 
 /** spend per provider for a fixed rolling time window */
@@ -125,4 +139,6 @@ export interface CostByProject {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  /** runs in this group whose cost could not be priced. defaults to 0. */
+  unpricedRunCount: number;
 }
