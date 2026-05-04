@@ -1178,6 +1178,7 @@ export const storybookBudgetSummaries: BudgetPolicySummary[] = [
     pauseReason: null,
     windowStart: new Date("2026-04-01T00:00:00.000Z"),
     windowEnd: new Date("2026-05-01T00:00:00.000Z"),
+    unpricedRunCount: 0,
   },
   {
     policyId: "budget-project-warning",
@@ -1202,6 +1203,7 @@ export const storybookBudgetSummaries: BudgetPolicySummary[] = [
     pauseReason: null,
     windowStart: new Date("2026-04-01T00:00:00.000Z"),
     windowEnd: new Date("2026-05-01T00:00:00.000Z"),
+    unpricedRunCount: 0,
   },
   {
     policyId: "budget-agent-hard-stop",
@@ -1226,6 +1228,7 @@ export const storybookBudgetSummaries: BudgetPolicySummary[] = [
     pauseReason: "budget",
     windowStart: new Date("2026-04-01T00:00:00.000Z"),
     windowEnd: new Date("2026-05-01T00:00:00.000Z"),
+    unpricedRunCount: 0,
   },
 ];
 

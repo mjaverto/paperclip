@@ -402,6 +402,9 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       pauseReason: scope.pauseReason,
       windowStart: start,
       windowEnd: end,
+      // Lane D will populate this from the cost_events aggregate. Default to 0
+      // so the type compiles before the aggregation is wired up.
+      unpricedRunCount: 0,
     };
   }
 
@@ -767,6 +770,9 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         pausedAgentCount: new Set(policies.filter((policy) => policy.scopeType === "agent" && policy.paused).map((policy) => policy.scopeId)).size,
         pausedProjectCount: new Set(policies.filter((policy) => policy.scopeType === "project" && policy.paused).map((policy) => policy.scopeId)).size,
         pendingApprovalCount: activeIncidents.filter((incident) => incident.approvalStatus === "pending").length,
+        // Sum of per-policy unpriced counts. Lane D will populate the per-policy
+        // values from the cost_events aggregate; until then this is 0.
+        unpricedRunCount: policies.reduce((sum, policy) => sum + (policy.unpricedRunCount ?? 0), 0),
       };
     },
 
