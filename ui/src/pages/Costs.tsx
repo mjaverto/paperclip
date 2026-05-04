@@ -26,6 +26,7 @@ import { costsApi } from "../api/costs";
 import { BillerSpendCard } from "../components/BillerSpendCard";
 import { BudgetIncidentCard } from "../components/BudgetIncidentCard";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { CostCell } from "../components/CostCell";
 import { EmptyState } from "../components/EmptyState";
 import { FinanceBillerCard } from "../components/FinanceBillerCard";
 import { FinanceKindCard } from "../components/FinanceKindCard";
@@ -58,6 +59,28 @@ export interface CostsProps {
   hideBudgetsTab?: boolean;
 }
 
+/**
+ * Compact text suffix appended next to a cost value when one or more
+ * underlying runs could not be priced. The full sentence form lives in
+ * BudgetPolicyCard; this is the row-/total-level compact variant.
+ *
+ * Returns an empty string when count <= 0 so callers can drop it inline
+ * without conditionals.
+ */
+export function unpricedSuffix(count: number): string {
+  if (!count || count <= 0) return "";
+  return count === 1 ? "(1 unpriced)" : `(${count} unpriced)`;
+}
+
+/**
+ * a11y/tooltip label for any UI surface that displays a cost total whose
+ * underlying rows include unpriced runs.
+ */
+export function unpricedTooltip(count: number): string | undefined {
+  if (!count || count <= 0) return undefined;
+  return `${count} ${count === 1 ? "run" : "runs"} missing cost data — total may be undercount.`;
+}
+
 function currentWeekRange(): { from: string; to: string } {
   const now = new Date();
   const day = now.getDay();
@@ -70,11 +93,16 @@ function currentWeekRange(): { from: string; to: string } {
 function ProviderTabLabel({ provider, rows }: { provider: string; rows: CostByProviderModel[] }) {
   const totalTokens = rows.reduce((sum, row) => sum + row.inputTokens + row.cachedInputTokens + row.outputTokens, 0);
   const totalCost = rows.reduce((sum, row) => sum + row.costCents, 0);
+  const unpricedTotal = rows.reduce((sum, row) => sum + (row.unpricedRunCount ?? 0), 0);
+  const tooltip = unpricedTooltip(unpricedTotal);
   return (
-    <span className="flex items-center gap-1.5">
+    <span className="flex items-center gap-1.5" title={tooltip} aria-label={tooltip}>
       <span>{providerDisplayName(provider)}</span>
       <span className="font-mono text-xs text-muted-foreground">{formatTokens(totalTokens)}</span>
       <span className="text-xs text-muted-foreground">{formatCents(totalCost)}</span>
+      {unpricedTotal > 0 ? (
+        <span className="text-xs text-muted-foreground">{unpricedSuffix(unpricedTotal)}</span>
+      ) : null}
     </span>
   );
 }
@@ -82,11 +110,16 @@ function ProviderTabLabel({ provider, rows }: { provider: string; rows: CostByPr
 function BillerTabLabel({ biller, rows }: { biller: string; rows: CostByBiller[] }) {
   const totalTokens = rows.reduce((sum, row) => sum + row.inputTokens + row.cachedInputTokens + row.outputTokens, 0);
   const totalCost = rows.reduce((sum, row) => sum + row.costCents, 0);
+  const unpricedTotal = rows.reduce((sum, row) => sum + (row.unpricedRunCount ?? 0), 0);
+  const tooltip = unpricedTooltip(unpricedTotal);
   return (
-    <span className="flex items-center gap-1.5">
+    <span className="flex items-center gap-1.5" title={tooltip} aria-label={tooltip}>
       <span>{providerDisplayName(biller)}</span>
       <span className="font-mono text-xs text-muted-foreground">{formatTokens(totalTokens)}</span>
       <span className="text-xs text-muted-foreground">{formatCents(totalCost)}</span>
+      {unpricedTotal > 0 ? (
+        <span className="text-xs text-muted-foreground">{unpricedSuffix(unpricedTotal)}</span>
+      ) : null}
     </span>
   );
 }
@@ -526,16 +559,25 @@ export function Costs({
       (sum, provider) => sum + (byProvider.get(provider)?.reduce((acc, row) => acc + row.costCents, 0) ?? 0),
       0,
     );
+    const allUnpriced = providerKeys.reduce(
+      (sum, provider) =>
+        sum + (byProvider.get(provider)?.reduce((acc, row) => acc + (row.unpricedRunCount ?? 0), 0) ?? 0),
+      0,
+    );
+    const allTooltip = unpricedTooltip(allUnpriced);
     return [
       {
         value: "all",
         label: (
-          <span className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1.5" title={allTooltip} aria-label={allTooltip}>
             <span>All providers</span>
             {providerKeys.length > 0 ? (
               <>
                 <span className="font-mono text-xs text-muted-foreground">{formatTokens(allTokens)}</span>
                 <span className="text-xs text-muted-foreground">{formatCents(allCents)}</span>
+                {allUnpriced > 0 ? (
+                  <span className="text-xs text-muted-foreground">{unpricedSuffix(allUnpriced)}</span>
+                ) : null}
               </>
             ) : null}
           </span>
@@ -558,16 +600,25 @@ export function Costs({
       (sum, biller) => sum + (byBiller.get(biller)?.reduce((acc, row) => acc + row.costCents, 0) ?? 0),
       0,
     );
+    const allUnpriced = billerKeys.reduce(
+      (sum, biller) =>
+        sum + (byBiller.get(biller)?.reduce((acc, row) => acc + (row.unpricedRunCount ?? 0), 0) ?? 0),
+      0,
+    );
+    const allTooltip = unpricedTooltip(allUnpriced);
     return [
       {
         value: "all",
         label: (
-          <span className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1.5" title={allTooltip} aria-label={allTooltip}>
             <span>All billers</span>
             {billerKeys.length > 0 ? (
               <>
                 <span className="font-mono text-xs text-muted-foreground">{formatTokens(allTokens)}</span>
                 <span className="text-xs text-muted-foreground">{formatCents(allCents)}</span>
+                {allUnpriced > 0 ? (
+                  <span className="text-xs text-muted-foreground">{unpricedSuffix(allUnpriced)}</span>
+                ) : null}
               </>
             ) : null}
           </span>
@@ -888,6 +939,63 @@ export function Costs({
                   ))}
                 </div>
               ) : null}
+
+<Card>
+                  <CardHeader className="px-5 pt-5 pb-2">
+                    <CardTitle className="text-base">Inference ledger</CardTitle>
+                    <CardDescription>
+                      Request-scoped inference spend for the selected period.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4 px-5 pb-5 pt-2">
+                    <div className="flex flex-wrap items-end justify-between gap-3">
+                      <div>
+                        <div
+                          className="text-3xl font-semibold tabular-nums"
+                          title={unpricedTooltip(spendData?.summary.unpricedRunCount ?? 0)}
+                        >
+                          {formatCents(spendData?.summary.spendCents ?? 0)}
+                          {(spendData?.summary.unpricedRunCount ?? 0) > 0 ? (
+                            <span className="ml-2 text-sm font-normal text-muted-foreground">
+                              {unpricedSuffix(spendData?.summary.unpricedRunCount ?? 0)}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 text-sm text-muted-foreground">
+                          {spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
+                            ? `Budget ${formatCents(spendData.summary.budgetCents)}`
+                            : "Unlimited budget"}
+                        </div>
+                      </div>
+                      <div className="border border-border px-4 py-3 text-right">
+                        <div className="text-(length:--text-micro) uppercase tracking-(--tracking-eyebrow) text-muted-foreground">usage</div>
+                        <div className="mt-1 text-lg font-medium tabular-nums">
+                          {formatTokens(inferenceTokenTotal)}
+                        </div>
+                      </div>
+                    </div>
+                    {spendData?.summary.budgetCents && spendData.summary.budgetCents > 0 ? (
+                      <div className="space-y-2">
+                        <div className="h-2 overflow-hidden bg-muted">
+                          <div
+                            className={cn(
+                              "h-full transition-(--tp-width-background-color) duration-150",
+                              spendData.summary.utilizationPercent > 90
+                                ? "bg-(--status-task-blocked)"
+                                : spendData.summary.utilizationPercent > 70
+                                  ? "bg-(--status-task-todo)"
+                                  : "bg-(--status-task-done)",
+                            )}
+                            style={{ width: `${Math.min(100, spendData.summary.utilizationPercent)}%` }}
+                          />
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {spendData.summary.utilizationPercent}% of monthly budget consumed in this range.
+                        </div>
+                      </div>
+                    ) : null}
+                  </CardContent>
+                </Card>
 
               {financeData ? (
                 <FinanceSummaryCard
