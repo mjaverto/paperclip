@@ -6,6 +6,7 @@ import {
   applyPersistedExecutionWorkspaceConfig,
   buildRealizedExecutionWorkspaceFromPersisted,
   buildExplicitResumeSessionOverride,
+  computeReplayedSessionInputTokens,
   deriveTaskKeyWithHeartbeatFallback,
   extractWakeCommentIds,
   formatRuntimeWorkspaceWarningLog,
@@ -592,5 +593,31 @@ describe("parseSessionCompactionPolicy", () => {
       maxRawInputTokens: 500_000,
       maxSessionAgeHours: 0,
     });
+  });
+});
+
+describe("computeReplayedSessionInputTokens", () => {
+  it("sums fresh and cached input so cached replay counts toward the rotation threshold", () => {
+    // Regression: a PM agent grew to 8.4M cached tokens under a nominal 2M cap
+    // because fresh input stayed under the threshold. The rotation guard must
+    // count the full replayed transcript (fresh + cached), not fresh alone.
+    const maxRawInputTokens = 2_000_000;
+
+    const freshOnly = {
+      inputTokens: 1_500_000,
+      cachedInputTokens: 0,
+      outputTokens: 10_000,
+    };
+    expect(computeReplayedSessionInputTokens(freshOnly)).toBe(1_500_000);
+    expect(computeReplayedSessionInputTokens(freshOnly) >= maxRawInputTokens).toBe(false);
+
+    const bloatedByCache = {
+      inputTokens: 1_500_000,
+      cachedInputTokens: 8_400_000,
+      outputTokens: 10_000,
+    };
+    expect(computeReplayedSessionInputTokens(bloatedByCache)).toBe(9_900_000);
+    // Fresh alone (1.5M) is under the 2M cap, but fresh + cached trips the guard.
+    expect(computeReplayedSessionInputTokens(bloatedByCache) >= maxRawInputTokens).toBe(true);
   });
 });

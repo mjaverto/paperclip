@@ -1520,6 +1520,15 @@ function formatCount(value: number | null | undefined) {
   return value.toLocaleString("en-US");
 }
 
+// Total replayed-context input tokens for a session = fresh input + cached input.
+// `maxRawInputTokens` bounds how large the replayed session transcript has grown,
+// and cached tokens are still part of that replayed context. Counting fresh input
+// alone let sessions bloat to millions of cached tokens (observed: 8.4M) without
+// ever tripping the rotation guard, because fresh input stayed under the cap.
+export function computeReplayedSessionInputTokens(usage: UsageTotals): number {
+  return usage.inputTokens + usage.cachedInputTokens;
+}
+
 export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect): SessionCompactionPolicy {
   return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
 }
@@ -3530,10 +3539,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else if (
       policy.maxRawInputTokens > 0 &&
       latestRawUsage &&
-      latestRawUsage.inputTokens >= policy.maxRawInputTokens
+      // Count fresh + cached input (see computeReplayedSessionInputTokens): cached
+      // tokens are part of the replayed transcript, so comparing fresh-only let
+      // sessions bloat past the cap on cached replay without rotating.
+      computeReplayedSessionInputTokens(latestRawUsage) >= policy.maxRawInputTokens
     ) {
       reason =
-        `session raw input reached ${formatCount(latestRawUsage.inputTokens)} tokens ` +
+        `session raw input reached ${formatCount(computeReplayedSessionInputTokens(latestRawUsage))} tokens ` +
         `(threshold ${formatCount(policy.maxRawInputTokens)})`;
     } else if (policy.maxSessionAgeHours > 0 && sessionAgeHours >= policy.maxSessionAgeHours) {
       reason = `session age reached ${Math.floor(sessionAgeHours)} hours`;
