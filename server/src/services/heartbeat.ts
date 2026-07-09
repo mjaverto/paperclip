@@ -2294,53 +2294,10 @@ function resolveLedgerBiller(result: AdapterExecutionResult): string {
   return readNonEmptyString(result.biller) ?? readNonEmptyString(result.provider) ?? "unknown";
 }
 
-function normalizeBilledCostCents(
-  adapterCostUsd: number | null | undefined,
-  billingType: BillingType | string | null | undefined,
-  pricingContext?: {
-    provider: string | null;
-    model: string | null;
-    usage: UsageSummary | UsageTotals | null | undefined;
-  },
-): number | null {
-  // subscription_included is genuinely free for the user — preserve "0", not null.
+function normalizeBilledCostCents(costUsd: number | null | undefined, billingType: BillingType): number {
   if (billingType === "subscription_included") return 0;
-
-  // 1. Adapter wins. Even 0 wins (it means the adapter knows the run was free).
-  if (typeof adapterCostUsd === "number" && Number.isFinite(adapterCostUsd)) {
-    return Math.max(0, Math.round(adapterCostUsd * 100));
-  }
-
-  // 2. Pricing service fallback. Only fires when we have provider/model context.
-  if (pricingContext) {
-    const usage = pricingContext.usage;
-    const inputTokens = Math.max(0, Math.floor(asNumber((usage as { inputTokens?: unknown } | null | undefined)?.inputTokens, 0)));
-    const outputTokens = Math.max(0, Math.floor(asNumber((usage as { outputTokens?: unknown } | null | undefined)?.outputTokens, 0)));
-    const cachedInputTokens = Math.max(
-      0,
-      Math.floor(asNumber((usage as { cachedInputTokens?: unknown } | null | undefined)?.cachedInputTokens, 0)),
-    );
-    const reasoningTokens = Math.max(
-      0,
-      Math.floor(asNumber((usage as { reasoningTokens?: unknown } | null | undefined)?.reasoningTokens, 0)),
-    );
-    const usd = priceUsd({
-      provider: pricingContext.provider,
-      model: pricingContext.model,
-      inputTokens,
-      outputTokens,
-      cachedInputTokens,
-      reasoningTokens,
-      billingType: typeof billingType === "string" ? billingType : null,
-    });
-    if (typeof usd === "number" && Number.isFinite(usd)) {
-      return Math.max(0, Math.round(usd * 100));
-    }
-    return null;
-  }
-
-  // 3. No adapter cost and no pricing context — write NULL.
-  return null;
+  if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return 0;
+  return Math.max(0, Math.round(costUsd * 100));
 }
 
 async function resolveLedgerScopeForRun(
@@ -9632,19 +9589,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const isFirstHeartbeat = !existing.lastHeartbeatAt;
 
     const runningCount = await countRunningRunsForAgent(agentId);
-    const willRetry =
-      runningCount === 0 &&
-      (outcome === "failed" || outcome === "timed_out") &&
-      (await shouldAutoRetry(agentId, taskKey ?? null));
-
     const nextStatus =
       runningCount > 0
         ? "running"
         : outcome === "succeeded" || outcome === "interrupted" || outcome === "cancelled" || (outcome === "failed" && options?.keepIdleOnFailure)
           ? "idle"
-          : willRetry
-            ? "idle"
-            : "error";
+          : "error";
 
     const updated = await db
       .update(agents)
@@ -9679,22 +9629,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           outcome,
         },
       });
-    }
-
-    if (willRetry) {
-      logger.info({ agentId, taskKey }, "auto-retrying agent after failure");
-      const retryWakeup = await enqueueWakeup(agentId, {
-        source: "automation",
-        reason: "auto_retry_after_failure",
-        triggerDetail: "system",
-        payload: { issueId: taskKey },
-      }).catch((err) => {
-        logger.warn({ err, agentId, taskKey }, "auto-retry wakeup enqueue failed");
-        return null;
-      });
-      if (!retryWakeup) {
-        logger.warn({ agentId, taskKey }, "auto-retry wakeup was skipped or failed; agent left idle, scheduler will pick up on next tick");
-      }
     }
   }
 
@@ -10130,43 +10064,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const outputTokens = usage?.outputTokens ?? 0;
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
     const billingType = normalizeLedgerBillingType(result.billingType);
-    const provider = result.provider ?? "unknown";
-    const additionalCostCents = normalizeBilledCostCents(result.costUsd, billingType, {
-      provider,
-      model: result.model ?? null,
-      usage: usage ?? result.usage ?? null,
-    });
+    const additionalCostCents = normalizeBilledCostCents(result.costUsd, billingType);
     const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
+    const provider = result.provider ?? "unknown";
     const biller = resolveLedgerBiller(result);
     const ledgerScope = await resolveLedgerScopeForRun(db, agent.companyId, run);
 
-    // CRITICAL: only update totalCostCents when we have a real number. PG `n + NULL = NULL`
-    // would corrupt the running counter — Lane D plan, option (a).
-    const runtimeUpdate: Record<string, unknown> = {
-      adapterType: agent.adapterType,
-      sessionId: session.legacySessionId,
-      lastRunId: run.id,
-      lastRunStatus: run.status,
-      lastError: result.errorMessage ?? null,
-      totalInputTokens: sql`${agentRuntimeState.totalInputTokens} + ${inputTokens}`,
-      totalOutputTokens: sql`${agentRuntimeState.totalOutputTokens} + ${outputTokens}`,
-      totalCachedInputTokens: sql`${agentRuntimeState.totalCachedInputTokens} + ${cachedInputTokens}`,
-      updatedAt: new Date(),
-    };
-    if (additionalCostCents !== null) {
-      runtimeUpdate.totalCostCents = sql`${agentRuntimeState.totalCostCents} + ${additionalCostCents}`;
-    }
-
     await db
       .update(agentRuntimeState)
-      .set(runtimeUpdate)
+      .set({
+        adapterType: agent.adapterType,
+        sessionId: session.legacySessionId,
+        lastRunId: run.id,
+        lastRunStatus: run.status,
+        lastError: result.errorMessage ?? null,
+        totalInputTokens: sql`${agentRuntimeState.totalInputTokens} + ${inputTokens}`,
+        totalOutputTokens: sql`${agentRuntimeState.totalOutputTokens} + ${outputTokens}`,
+        totalCachedInputTokens: sql`${agentRuntimeState.totalCachedInputTokens} + ${cachedInputTokens}`,
+        totalCostCents: sql`${agentRuntimeState.totalCostCents} + ${additionalCostCents}`,
+        updatedAt: new Date(),
+      })
       .where(eq(agentRuntimeState.agentId, agent.id));
 
-    // Emit a cost_event when there's any signal worth recording: token usage or
-    // a non-zero adapter cost. Null `additionalCostCents` is fine — it lands in
-    // cost_events.cost_cents as NULL and the unpriced aggregates surface it.
-    const hasNonZeroCost = additionalCostCents !== null && additionalCostCents > 0;
-    if (hasNonZeroCost || hasTokenUsage) {
+    if (additionalCostCents > 0 || hasTokenUsage) {
       const costs = costService(db, budgetHooks);
       await costs.createEvent(agent.companyId, {
         heartbeatRunId: run.id,
@@ -14932,75 +14852,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               }),
         };
       });
-    },
-
-    stats: async (companyId: string, agentId?: string) => {
-      const now = new Date();
-      // Calculate 14 days ago for the trailing activity window
-      const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-      
-      const condition = agentId 
-        ? and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId), gt(heartbeatRuns.createdAt, fourteenDaysAgo))
-        : and(eq(heartbeatRuns.companyId, companyId), gt(heartbeatRuns.createdAt, fourteenDaysAgo));
-
-      const rows = await db
-        .select({
-          date: sql<string>`DATE(${heartbeatRuns.createdAt})`.as("date"),
-          status: heartbeatRuns.status,
-          count: sql<number>`count(*)`.as("count"),
-        })
-        .from(heartbeatRuns)
-        .where(condition)
-        .groupBy(sql`DATE(${heartbeatRuns.createdAt})`, heartbeatRuns.status);
-      
-      return rows.map(r => ({ ...r, count: Number(r.count) }));
-    },
-
-    latestFailed: async (companyId: string) => {
-      // Get the most recent run for each agent in the company
-      // Note: DISTINCT ON is a PostgreSQL-specific feature.
-      const rows = await db.execute(sql`
-        SELECT DISTINCT ON (agent_id)
-          *
-        FROM heartbeat_runs
-        WHERE company_id = ${companyId}
-        ORDER BY agent_id, created_at DESC
-      `);
-      
-      // Filter to only those whose most recent run was a failure
-      const failedRows = rows.filter((r: any) => r.status === 'failed' || r.status === 'timed_out');
-      
-      // We need to map snake_case to camelCase since execute() returns raw sql rows
-      return failedRows.map((row: any) => ({
-        id: row.id,
-        companyId: row.company_id,
-        agentId: row.agent_id,
-        status: row.status,
-        errorCode: row.error_code,
-        error: row.error,
-        stderrExcerpt: row.stderr_excerpt,
-        invocationSource: row.invocation_source,
-        triggerDetail: row.trigger_detail,
-        contextSnapshot: row.context_snapshot,
-        resultJson: summarizeHeartbeatRunResultJson(row.result_json),
-        logStore: row.log_store,
-        logRef: row.log_ref,
-        startedAt: row.started_at,
-        finishedAt: row.finished_at,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        wakeupRequestId: row.wakeup_request_id,
-        exitCode: row.exit_code,
-        signal: row.signal,
-        usageJson: row.usage_json,
-        sessionIdBefore: row.session_id_before,
-        sessionIdAfter: row.session_id_after,
-        logBytes: row.log_bytes,
-        logSha256: row.log_sha256,
-        logCompressed: row.log_compressed,
-        stdoutExcerpt: row.stdout_excerpt,
-        externalRunId: row.external_run_id,
-      }));
     },
 
     getRun,

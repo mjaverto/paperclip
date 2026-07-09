@@ -3440,21 +3440,6 @@ export function agentRoutes(
     res.json(result);
   });
 
-  router.get("/companies/:companyId/heartbeat-runs/stats", async (req, res) => {
-    const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    const agentId = req.query.agentId as string | undefined;
-    const stats = await heartbeat.stats(companyId, agentId);
-    res.json(stats);
-  });
-
-  router.get("/companies/:companyId/heartbeat-runs/latest-failed", async (req, res) => {
-    const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    const runs = await heartbeat.latestFailed(companyId);
-    res.json(runs);
-  });
-
   router.get("/companies/:companyId/heartbeat-runs", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
