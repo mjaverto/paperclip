@@ -1567,11 +1567,6 @@ export function heartbeatService(
       options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt;
 
     const runningCount = await countRunningRunsForAgent(agentId);
-    const willRetry =
-      runningCount === 0 &&
-      (outcome === "failed" || outcome === "timed_out") &&
-      (await shouldAutoRetry(agentId, taskKey ?? null));
-
     const nextStatus =
       runningCount > 0
         ? "running"
@@ -1580,9 +1575,7 @@ export function heartbeatService(
             outcome === "cancelled" ||
             (outcome === "failed" && options?.keepIdleOnFailure)
           ? "idle"
-          : willRetry
-            ? "idle"
-            : "error";
+          : "error";
 
     const updated = await db
       .update(agents)
@@ -1624,22 +1617,6 @@ export function heartbeatService(
           outcome,
         },
       });
-    }
-
-    if (willRetry) {
-      logger.info({ agentId, taskKey }, "auto-retrying agent after failure");
-      const retryWakeup = await enqueueWakeup(agentId, {
-        source: "automation",
-        reason: "auto_retry_after_failure",
-        triggerDetail: "system",
-        payload: { issueId: taskKey },
-      }).catch((err) => {
-        logger.warn({ err, agentId, taskKey }, "auto-retry wakeup enqueue failed");
-        return null;
-      });
-      if (!retryWakeup) {
-        logger.warn({ agentId, taskKey }, "auto-retry wakeup was skipped or failed; agent left idle, scheduler will pick up on next tick");
-      }
     }
   }
 
@@ -4005,75 +3982,6 @@ export function heartbeatService(
       }
     },
     list: listRuns,
-
-    stats: async (companyId: string, agentId?: string) => {
-      const now = new Date();
-      // Calculate 14 days ago for the trailing activity window
-      const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-      
-      const condition = agentId 
-        ? and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId), gt(heartbeatRuns.createdAt, fourteenDaysAgo))
-        : and(eq(heartbeatRuns.companyId, companyId), gt(heartbeatRuns.createdAt, fourteenDaysAgo));
-
-      const rows = await db
-        .select({
-          date: sql<string>`DATE(${heartbeatRuns.createdAt})`.as("date"),
-          status: heartbeatRuns.status,
-          count: sql<number>`count(*)`.as("count"),
-        })
-        .from(heartbeatRuns)
-        .where(condition)
-        .groupBy(sql`DATE(${heartbeatRuns.createdAt})`, heartbeatRuns.status);
-      
-      return rows.map(r => ({ ...r, count: Number(r.count) }));
-    },
-
-    latestFailed: async (companyId: string) => {
-      // Get the most recent run for each agent in the company
-      // Note: DISTINCT ON is a PostgreSQL-specific feature.
-      const rows = await db.execute(sql`
-        SELECT DISTINCT ON (agent_id)
-          *
-        FROM heartbeat_runs
-        WHERE company_id = ${companyId}
-        ORDER BY agent_id, created_at DESC
-      `);
-      
-      // Filter to only those whose most recent run was a failure
-      const failedRows = rows.filter((r: any) => r.status === 'failed' || r.status === 'timed_out');
-      
-      // We need to map snake_case to camelCase since execute() returns raw sql rows
-      return failedRows.map((row: any) => ({
-        id: row.id,
-        companyId: row.company_id,
-        agentId: row.agent_id,
-        status: row.status,
-        errorCode: row.error_code,
-        error: row.error,
-        stderrExcerpt: row.stderr_excerpt,
-        invocationSource: row.invocation_source,
-        triggerDetail: row.trigger_detail,
-        contextSnapshot: row.context_snapshot,
-        resultJson: summarizeHeartbeatRunResultJson(row.result_json),
-        logStore: row.log_store,
-        logRef: row.log_ref,
-        startedAt: row.started_at,
-        finishedAt: row.finished_at,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        wakeupRequestId: row.wakeup_request_id,
-        exitCode: row.exit_code,
-        signal: row.signal,
-        usageJson: row.usage_json,
-        sessionIdBefore: row.session_id_before,
-        sessionIdAfter: row.session_id_after,
-        logBytes: row.log_bytes,
-        logSha256: row.log_sha256,
-        logCompressed: row.log_compressed,
-        stdoutExcerpt: row.stdout_excerpt,
-        externalRunId: row.external_run_id,
-      }));
-    },
 
     getRun,
 
