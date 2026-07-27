@@ -1,5 +1,6 @@
 import {
   Inbox,
+  ListChecks,
   CircleDot,
   Target,
   LayoutDashboard,
@@ -10,6 +11,7 @@ import {
   Network,
   Boxes,
   Repeat,
+  Layers,
   GitBranch,
   Package,
   Settings,
@@ -17,8 +19,10 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Pin,
+  AppWindow,
   MessagesSquare,
   GanttChartSquare,
+  LayoutGrid,
 } from "lucide-react";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -31,10 +35,13 @@ import { SidebarStarredProjects } from "./SidebarStarredProjects";
 import { useDialogActions } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { useSidebar } from "../context/SidebarContext";
+import { attentionApi } from "../api/attention";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
+import { attentionBadgeCount } from "../lib/attention";
 import { useInboxBadge } from "../hooks/useInboxBadge";
+import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
@@ -56,17 +63,44 @@ export function Sidebar() {
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
   });
-  const { data: liveRuns } = useQuery({
-    queryKey: queryKeys.liveRuns(selectedCompanyId!),
-    queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
+  const liveRunsQueryKey = queryKeys.liveRuns(selectedCompanyId!);
+  const sharedLiveRuns = useSharedPollingQuery({
+    companyId: selectedCompanyId,
+    resourceKey: "live-runs",
+    queryKey: liveRunsQueryKey,
     enabled: !!selectedCompanyId,
-    refetchInterval: 10_000,
+    // Event-sourced via LiveUpdatesProvider (GitHub issue 9627) + reconnect reconcile — no
+    // interval poll needed. Polling here also re-armed React Query's timer on
+    // every live-event cache write, a major source of steady-state churn.
+    refetchInterval: false,
+    leaderOnly: true,
   });
+  const { data: liveRuns, dataUpdatedAt: liveRunsUpdatedAt } = useQuery({
+    queryKey: liveRunsQueryKey,
+    queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
+    enabled: sharedLiveRuns.enabled,
+    refetchInterval: sharedLiveRuns.refetchInterval,
+  });
+  usePublishSharedQueryData(sharedLiveRuns, liveRuns, liveRunsUpdatedAt);
   const liveRunCount = liveRuns?.length ?? 0;
   const showWorkspacesLink = experimentalSettings?.enableIsolatedWorkspaces === true;
+  const showApps = experimentalSettings?.enableApps === true;
   const showPipelines = experimentalSettings?.enablePipelines === true;
+  const showStatusCards = experimentalSettings?.enableStatusCards === true;
   const goalsLinkPending = experimentalSettings === undefined;
   const showGoalsLink = experimentalSettings?.enableGoalsSidebarLink === true;
+  // Decisions (attention home) is an experimental surface (PAP-13481): the nav
+  // item is hidden entirely until the flag is enabled (same no-flash pattern as
+  // showWorkspacesLink — it defaults hidden, so no placeholder is needed).
+  const showDecisions = experimentalSettings?.enableDecisions === true;
+  const { data: attentionFeed } = useQuery({
+    queryKey: queryKeys.attention(selectedCompanyId!),
+    queryFn: () => attentionApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId && showDecisions,
+    refetchInterval: 60_000,
+  });
+  const attentionCount = attentionBadgeCount(attentionFeed);
+  const showCases = experimentalSettings?.enableCases === true;
   // Streamlined left navigation (top-level Projects link + starred children) is
   // now the standard product sidebar (PAP-12472). The former experimental
   // opt-out was retired; classic per-project collapsible mode is no longer
@@ -177,6 +211,18 @@ export function Sidebar() {
             badgeTone={inboxBadge.failedRuns > 0 ? "danger" : "default"}
             alert={inboxBadge.failedRuns > 0}
           />
+          {showDecisions ? (
+            <SidebarNavItem
+              to="/decisions"
+              label="Decisions"
+              icon={ListChecks}
+              badge={attentionCount}
+              badgeLabel="decisions"
+            />
+          ) : null}
+          {showStatusCards ? (
+            <SidebarNavItem to="/status" label="Status" icon={LayoutGrid} textBadge="beta" />
+          ) : null}
           {conferenceRoomChatEnabled ? (
             <SidebarNavItem to="/board-chat" label="Conference Room" icon={MessagesSquare} />
           ) : null}
@@ -184,6 +230,9 @@ export function Sidebar() {
 
         <SidebarSection label="Work" collapsible={{ open: workOpen, onOpenChange: setWorkOpen }}>
           <SidebarNavItem to="/issues" label="Tasks" icon={CircleDot} />
+          {showCases ? (
+            <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />
+          ) : null}
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
           {showPipelines ? (
             <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
@@ -230,6 +279,7 @@ export function Sidebar() {
 
         <SidebarSection label="Company" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
           <SidebarNavItem to="/org" label="Org" icon={Network} />
+          {showApps ? <SidebarNavItem to="/apps" label="Apps" icon={AppWindow} /> : null}
           <SidebarNavItem to="/timeline" label="Timeline" icon={GanttChartSquare} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />

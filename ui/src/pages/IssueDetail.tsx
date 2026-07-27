@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEve
 import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { Link, useLocation, useNavigate, useNavigationType, useParams } from "@/lib/router";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/react-query";
+import { usePublishSharedQueryData, useSharedPollingQuery } from "@/hooks/useSharedPolling";
 import { ApiError } from "../api/client";
 import { issuesApi } from "../api/issues";
 import { approvalsApi } from "../api/approvals";
@@ -9,6 +10,10 @@ import { activityApi, type RunForIssue } from "../api/activity";
 import { heartbeatsApi, type ActiveRunForIssue, type LiveRunForIssue } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { accessApi, type CurrentBoardAccess } from "../api/access";
+import {
+  canBoardManageRuntime,
+  readRecoveryReconcileWorkspaceId,
+} from "../lib/recovery-reconcile";
 import { agentsApi } from "../api/agents";
 import { authApi } from "../api/auth";
 import { projectsApi } from "../api/projects";
@@ -36,8 +41,13 @@ import {
 import { resolveIssueActiveRun, shouldTrackIssueActiveRun } from "../lib/issueActiveRun";
 import { getIssueDetailQueryOptions } from "../lib/issueDetailCache";
 import {
+  beginLocalInboxArchive,
+  boundLocalInboxArchive,
   cancelInboxIssueQueries,
+  clearLocalInboxArchive,
+  confirmLocalInboxArchive,
   invalidateInboxIssueQueries,
+  getIssuePresenceInActiveInboxCaches,
   removeIssueFromInboxCaches,
   restoreIssueToInboxCaches,
   snapshotInboxIssueCaches,
@@ -70,6 +80,7 @@ import {
 import { clearIssueExecutionRun, removeLiveRunById, upsertInterruptedRun } from "../lib/optimistic-issue-runs";
 import { useProjectOrder } from "../hooks/useProjectOrder";
 import { relativeTime, cn, formatDurationMs, formatTokens, visibleRunCostUsd } from "../lib/utils";
+import { liveBlueBadge } from "../lib/status-colors";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { InlineEditor } from "../components/InlineEditor";
 import {
@@ -96,7 +107,11 @@ import { IssuesList } from "../components/IssuesList";
 import { AgentIcon } from "../components/AgentIconPicker";
 import { IssueReferenceActivitySummary } from "../components/IssueReferenceActivitySummary";
 import { IssueRelatedWorkPanel } from "../components/IssueRelatedWorkPanel";
-import { IssueMonitorActivityCard } from "../components/IssueMonitorActivityCard";
+import {
+  IssueMonitorBanner,
+  IssueMonitorComposerStrip,
+  hasVisibleMonitorSurface,
+} from "../components/IssueMonitorBanner";
 import { IssueScheduledRetryCard } from "../components/IssueScheduledRetryCard";
 import { IssueProperties } from "../components/IssueProperties";
 import { PauseAffectsSummaryView } from "../components/interrupt-handoff/InterruptHandoffViews";
@@ -192,6 +207,8 @@ import {
   type IssueThreadInteraction,
   type RequestCheckboxConfirmationInteraction,
   type RequestConfirmationInteraction,
+  type RequestItemVerdictsInteraction,
+  type RequestItemVerdictValue,
   type SuggestTasksInteraction,
   type IssueTreeControlMode,
   type WorkspaceFileRef,
@@ -293,59 +310,11 @@ export function canBoardResolveRecoveryAction(
   return membership.membershipRole !== "viewer" && membership.membershipRole !== null;
 }
 
-/**
- * Best-effort client mirror of the backend `runtime:manage` gate that the break-glass override
- * reconcile (`POST /execution-workspaces/:id/reconcile-branch` in `override` mode) actually
- * enforces. The server re-checks `runtime:manage` for every reconcile and is authoritative, so
- * this is defense-in-depth: it hides the "reconcile anyway" affordance from viewers rather than
- * showing a button that always 403s. For human board members `runtime:manage` grants on the
- * same non-viewer, active-membership condition as recovery resolution (see
- * `server/src/services/authorization.ts`), so the shape matches; per-permission-key overrides
- * are not surfaced to the client and remain the server's call.
- */
-export function canBoardManageRuntime(
-  companyId: string | null | undefined,
-  boardAccess: CurrentBoardAccess | undefined,
-) {
-  if (!companyId || !boardAccess) return false;
-  if (boardAccess.source === "local_implicit" || boardAccess.isInstanceAdmin) return true;
-  if (!boardAccess.memberships || boardAccess.memberships.length === 0) {
-    return boardAccess.companyIds.includes(companyId);
-  }
-
-  const membership = boardAccess.memberships.find(
-    (item) => item.companyId === companyId && item.status === "active",
-  );
-  if (!membership) return false;
-  return membership.membershipRole !== "viewer" && membership.membershipRole !== null;
-}
-
-/**
- * The execution workspace a reconcile action should target. The recovery card is rendered from a
- * specific `workspace_validation` recovery action whose evidence pins the workspace that diverged;
- * that workspace — not the page-level `issue.executionWorkspaceId` — is the authoritative target.
- * The page-level id can drift (e.g. a re-issue rebinds the issue to a new workspace) while the card
- * still shows the older action, so we prefer the action's evidence and only fall back to the
- * page-level id when the evidence carries no workspace reference.
- *
- * The branch-incoherence failure (the one that renders the reconcile-forward / break-glass actions)
- * records the workspace under `persistedExecutionWorkspaceId`; the not-reusable failure records it
- * under `executionWorkspaceId`. We accept either key so both divergence shapes pin correctly.
- */
-export function readRecoveryReconcileWorkspaceId(
-  action: IssueRecoveryAction | null | undefined,
-): string | null {
-  if (!action || action.kind !== "workspace_validation") return null;
-  const workspaceValidation = asRecord(action.evidence?.workspaceValidation);
-  if (!workspaceValidation) return null;
-  const persisted = workspaceValidation.persistedExecutionWorkspaceId;
-  if (typeof persisted === "string" && persisted.length > 0) return persisted;
-  const executionWorkspaceId = workspaceValidation.executionWorkspaceId;
-  if (typeof executionWorkspaceId === "string" && executionWorkspaceId.length > 0) {
-    return executionWorkspaceId;
-  }
-  return null;
-}
+// `canBoardManageRuntime` and `readRecoveryReconcileWorkspaceId` moved to `@/lib/recovery-reconcile`
+// so the run-page recovery surface can reuse them without importing this page module. Re-exported
+// here (from the top-of-file import) to keep existing import sites — and their tests — stable, while
+// the imported bindings stay usable within this module.
+export { canBoardManageRuntime, readRecoveryReconcileWorkspaceId };
 
 export function shouldScrollIssueDetailToTopOnNavigation(input: {
   previousIssueId: string | undefined;
@@ -356,12 +325,19 @@ export function shouldScrollIssueDetailToTopOnNavigation(input: {
   return input.previousIssueId !== input.nextIssueId;
 }
 
-function resolveRunningIssueRun(
+function resolveInterruptibleIssueRun(
   activeRun: ActiveRunForIssue | null | undefined,
   liveRuns: readonly LiveRunForIssue[] | undefined,
 ) {
-  const runningLiveRun = (liveRuns ?? []).find((run) => run.status === "running") ?? null;
-  return runningLiveRun ?? (activeRun?.status === "running" ? activeRun : null);
+  const issueLiveRun =
+    (liveRuns ?? []).find((run) => run.status === "running") ??
+    (liveRuns ?? []).find((run) => run.status === "queued") ??
+    null;
+  return issueLiveRun ?? (
+    activeRun?.status === "running" || activeRun?.status === "queued"
+      ? activeRun
+      : null
+  );
 }
 
 function dedupeLiveRunsById(liveRuns: readonly LiveRunForIssue[]) {
@@ -394,7 +370,7 @@ function readIssueRunStateFromCache(
   return {
     liveRuns,
     activeRun: resolvedActiveRun,
-    runningIssueRun: resolveRunningIssueRun(resolvedActiveRun, liveRuns),
+    interruptibleIssueRun: resolveInterruptibleIssueRun(resolvedActiveRun, liveRuns),
   };
 }
 
@@ -887,6 +863,7 @@ type IssueDetailChatTabProps = {
   issueWorkMode: IssueWorkMode;
   executionRunId: string | null;
   blockedBy: Issue["blockedBy"];
+  liveIssueIds: ReadonlySet<string>;
   blockerAttention: Issue["blockerAttention"] | null;
   successfulRunHandoff: Issue["successfulRunHandoff"] | null;
   scheduledRetry: Issue["scheduledRetry"] | null;
@@ -896,6 +873,8 @@ type IssueDetailChatTabProps = {
   reissueIsolatedRecoveryActionPending?: boolean;
   onReconcileForwardRecoveryAction?: () => void;
   onBreakGlassOverrideRecoveryAction?: (reason: string) => void;
+  onQuarantineRestoreRecoveryAction?: () => void;
+  quarantineRestoreRecoveryActionPending?: boolean;
   canBreakGlassRecoveryAction?: boolean;
   reconcileRecoveryActionPending?: boolean;
   canFalsePositiveRecoveryAction?: boolean;
@@ -913,6 +892,8 @@ type IssueDetailChatTabProps = {
   onRefreshLatestComments: () => Promise<unknown> | void;
   onWorkModeChange?: (workMode: IssueWorkMode) => Promise<void> | void;
   composerRef: Ref<IssueChatComposerHandle>;
+  /** Optional node rendered inline directly above the reply composer (e.g. the monitor strip). */
+  composerAccessory?: ReactNode;
   footer?: ReactNode;
   feedbackVotes?: FeedbackVote[];
   feedbackDataSharingPreference: "allowed" | "not_allowed" | "prompt";
@@ -956,10 +937,15 @@ type IssueDetailChatTabProps = {
     answers: AskUserQuestionsAnswer[],
   ) => Promise<void>;
   onCancelInteraction: (interaction: AskUserQuestionsInteraction) => Promise<void>;
+  onSubmitInteractionVerdicts: (
+    interaction: RequestItemVerdictsInteraction,
+    verdicts: { id: string; verdict: RequestItemVerdictValue; reason?: string }[],
+  ) => Promise<void>;
   assigneeUserId: string | null;
   onResumeFromBacklog?: () => Promise<void> | void;
   resumeFromBacklogPending?: boolean;
   externalReferences?: MarkdownExternalReferenceMap;
+  linkCaseReferences?: boolean;
 };
 
 const IssueDetailChatTab = memo(function IssueDetailChatTab({
@@ -970,6 +956,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   issueStatus,
   executionRunId,
   blockedBy,
+  liveIssueIds,
   blockerAttention,
   successfulRunHandoff,
   scheduledRetry,
@@ -979,6 +966,8 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   reissueIsolatedRecoveryActionPending,
   onReconcileForwardRecoveryAction,
   onBreakGlassOverrideRecoveryAction,
+  onQuarantineRestoreRecoveryAction,
+  quarantineRestoreRecoveryActionPending,
   canBreakGlassRecoveryAction,
   reconcileRecoveryActionPending,
   canFalsePositiveRecoveryAction,
@@ -992,6 +981,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   onRefreshLatestComments,
   onWorkModeChange,
   composerRef,
+  composerAccessory,
   footer,
   feedbackVotes,
   feedbackDataSharingPreference,
@@ -1024,10 +1014,12 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   onRejectInteraction,
   onSubmitInteractionAnswers,
   onCancelInteraction,
+  onSubmitInteractionVerdicts,
   assigneeUserId,
   onResumeFromBacklog,
   resumeFromBacklogPending,
   externalReferences,
+  linkCaseReferences,
 }: IssueDetailChatTabProps) {
   const ThreadComponent = IssueChatThread;
   const { data: activity } = useQuery({
@@ -1064,8 +1056,8 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   const resolvedActivity = activity ?? [];
   const resolvedLinkedRuns = linkedRuns ?? [];
 
-  const runningIssueRun = useMemo(
-    () => resolveRunningIssueRun(resolvedActiveRun, resolvedLiveRuns),
+  const interruptibleIssueRun = useMemo(
+    () => resolveInterruptibleIssueRun(resolvedActiveRun, resolvedLiveRuns),
     [resolvedActiveRun, resolvedLiveRuns],
   );
   const liveRunIds = useMemo(() => {
@@ -1085,7 +1077,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     }));
   }, [liveRunIds, resolvedLinkedRuns]);
   const commentsWithRunMeta = useMemo<IssueDetailComment[]>(() => {
-    const activeRunStartedAt = runningIssueRun?.startedAt ?? runningIssueRun?.createdAt ?? null;
+    const activeRunStartedAt = interruptibleIssueRun?.startedAt ?? interruptibleIssueRun?.createdAt ?? null;
     const runMetaByCommentId = new Map<string, { runId: string; runAgentId: string | null; interruptedRunId: string | null }>();
     const followUpCommentIds = new Set<string>();
     const agentIdByRunId = new Map<string, string>();
@@ -1126,7 +1118,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       const locallyQueuedComment = applyLocalQueuedIssueCommentState(nextComment, {
         queuedTargetRunId,
         targetRunIsLive: queuedTargetRunId ? liveRunIds.has(queuedTargetRunId) : false,
-        runningRunId: runningIssueRun?.id ?? null,
+        runningRunId: interruptibleIssueRun?.id ?? null,
       });
       if (locallyQueuedComment !== nextComment) {
         return locallyQueuedComment;
@@ -1135,9 +1127,9 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         isQueuedIssueComment({
           comment: nextComment,
           activeRunStartedAt,
-          activeRunAgentId: runningIssueRun?.agentId ?? null,
-          activeRunCommentId: runningIssueRun?.contextCommentId ?? null,
-          activeRunWakeCommentId: runningIssueRun?.contextWakeCommentId ?? null,
+          activeRunAgentId: interruptibleIssueRun?.agentId ?? null,
+          activeRunCommentId: interruptibleIssueRun?.contextCommentId ?? null,
+          activeRunWakeCommentId: interruptibleIssueRun?.contextWakeCommentId ?? null,
           runId: meta?.runId ?? nextComment.runId ?? null,
           interruptedRunId: meta?.interruptedRunId ?? nextComment.interruptedRunId ?? null,
         })
@@ -1145,7 +1137,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         return {
           ...nextComment,
           queueState: "queued" as const,
-          queueTargetRunId: runningIssueRun?.id ?? nextComment.queueTargetRunId ?? null,
+          queueTargetRunId: interruptibleIssueRun?.id ?? nextComment.queueTargetRunId ?? null,
           queueReason: queuedCommentReason,
         };
       }
@@ -1158,7 +1150,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     queuedCommentReason,
     resolvedActivity,
     resolvedLinkedRuns,
-    runningIssueRun,
+    interruptibleIssueRun,
   ]);
   const timelineEvents = useMemo(
     () => extractIssueTimelineEvents(resolvedActivity),
@@ -1182,6 +1174,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       ) : null}
       <ThreadComponent
         composerRef={composerRef}
+        composerAccessory={composerAccessory}
         comments={commentsWithRunMeta}
         interactions={interactions}
         feedbackVotes={feedbackVotes}
@@ -1193,6 +1186,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         activeRun={resolvedActiveRun}
         issueId={issueId}
         blockedBy={blockedBy ?? []}
+        liveIssueIds={liveIssueIds}
         blockerAttention={blockerAttention}
         successfulRunHandoff={successfulRunHandoff}
         scheduledRetry={scheduledRetry}
@@ -1202,6 +1196,8 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         reissueIsolatedRecoveryActionPending={reissueIsolatedRecoveryActionPending}
         onReconcileForwardRecoveryAction={onReconcileForwardRecoveryAction}
         onBreakGlassOverrideRecoveryAction={onBreakGlassOverrideRecoveryAction}
+        onQuarantineRestoreRecoveryAction={onQuarantineRestoreRecoveryAction}
+        quarantineRestoreRecoveryActionPending={quarantineRestoreRecoveryActionPending}
         canBreakGlassRecoveryAction={canBreakGlassRecoveryAction}
         reconcileRecoveryActionPending={reconcileRecoveryActionPending}
         canFalsePositiveRecoveryAction={canFalsePositiveRecoveryAction}
@@ -1241,11 +1237,12 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
           onSubmitInteractionAnswers(interaction, answers)
         }
         onCancelInteraction={onCancelInteraction}
+        onSubmitInteractionVerdicts={onSubmitInteractionVerdicts}
         issueWorkMode={issueWorkMode}
         onWorkModeChange={onWorkModeChange}
-        onCancelRun={runningIssueRun && onPauseWorkRun
+        onCancelRun={interruptibleIssueRun && onPauseWorkRun
           ? async () => {
-              await onPauseWorkRun(runningIssueRun.id);
+              await onPauseWorkRun(interruptibleIssueRun.id);
             }
           : undefined}
         onImageClick={onImageClick}
@@ -1255,6 +1252,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         resumeFromBacklogPending={resumeFromBacklogPending}
         footer={footer}
         externalReferences={externalReferences}
+        linkCaseReferences={linkCaseReferences}
       />
     </div>
   );
@@ -1272,8 +1270,6 @@ type IssueDetailActivityTabProps = {
   userProfileMap: Map<string, import("../lib/company-members").CompanyUserProfile>;
   pendingApprovalAction: { approvalId: string; action: "approve" | "reject" } | null;
   onApprovalAction: (approvalId: string, action: "approve" | "reject") => void;
-  onCheckMonitorNow: () => void;
-  checkingMonitorNow: boolean;
   handoffFocusSignal?: number;
   externalReferences?: MarkdownExternalReferenceMap;
 };
@@ -1290,8 +1286,6 @@ function IssueDetailActivityTab({
   userProfileMap,
   pendingApprovalAction,
   onApprovalAction,
-  onCheckMonitorNow,
-  checkingMonitorNow,
   handoffFocusSignal = 0,
   externalReferences,
 }: IssueDetailActivityTabProps) {
@@ -1524,11 +1518,7 @@ function IssueDetailActivityTab({
         </div>
       )}
       <IssueScheduledRetryCard issueId={issue.id} scheduledRetry={issue.scheduledRetry ?? null} />
-      <IssueMonitorActivityCard
-        issue={issue}
-        onCheckNow={onCheckMonitorNow}
-        checkingNow={checkingMonitorNow}
-      />
+      {/* Waiting-monitor state now lives in the pinned top banner (IssueMonitorBanner) — PAP-14557 decision 1. */}
     </>
   );
 }
@@ -1707,13 +1697,24 @@ export function IssueDetail() {
     queryFn: () => issuesApi.list(resolvedCompanyId!, { parentId: issue!.parentId!, includeBlockedBy: true }),
     enabled: !!resolvedCompanyId && !!issue?.parentId,
   });
-  const { data: companyLiveRuns } = useQuery({
-    queryKey: resolvedCompanyId ? queryKeys.liveRuns(resolvedCompanyId) : ["live-runs", "pending"],
-    queryFn: () => heartbeatsApi.liveRunsForCompany(resolvedCompanyId!),
+  const companyLiveRunsQueryKey = resolvedCompanyId ? queryKeys.liveRuns(resolvedCompanyId) : ["live-runs", "pending"] as const;
+  const sharedCompanyLiveRuns = useSharedPollingQuery<LiveRunForIssue[]>({
+    companyId: resolvedCompanyId,
+    resourceKey: "live-runs",
+    queryKey: companyLiveRunsQueryKey,
     enabled: !!resolvedCompanyId,
-    refetchInterval: 5000,
+    // Event-sourced via LiveUpdatesProvider (GitHub issue 9627); no interval poll needed.
+    refetchInterval: false,
+    leaderOnly: true,
+  });
+  const { data: companyLiveRuns, dataUpdatedAt: companyLiveRunsUpdatedAt } = useQuery({
+    queryKey: companyLiveRunsQueryKey,
+    queryFn: () => heartbeatsApi.liveRunsForCompany(resolvedCompanyId!),
+    enabled: sharedCompanyLiveRuns.enabled,
+    refetchInterval: sharedCompanyLiveRuns.refetchInterval,
     placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(resolvedCompanyId ?? "pending"),
   });
+  usePublishSharedQueryData(sharedCompanyLiveRuns, companyLiveRuns, companyLiveRunsUpdatedAt);
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -1778,6 +1779,8 @@ export function IssueDetail() {
     retry: false,
   });
   const keyboardShortcutsEnabled = instanceGeneralSettings?.keyboardShortcuts === true;
+  // Experimental Cases: linkify `PAP-C7` chips in this issue's comment bodies.
+  const casesChipsEnabled = instanceExperimentalSettings?.enableCases === true;
   const feedbackDataSharingPreference = instanceGeneralSettings?.feedbackDataSharingPreference ?? "prompt";
   const showPlanDecompositionsSection =
     instanceExperimentalSettings?.enableIssuePlanDecompositions === true;
@@ -2426,7 +2429,9 @@ export function IssueDetail() {
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.detail(issueId!) });
 
       const previousIssue = queryClient.getQueryData<Issue>(queryKeys.issues.detail(issueId!));
-      const queuedComment = !interrupt ? readIssueRunStateFromCache(queryClient, issueId!, issue).runningIssueRun : null;
+      const queuedComment = !interrupt
+        ? readIssueRunStateFromCache(queryClient, issueId!, issue).interruptibleIssueRun
+        : null;
       const optimisticComment = issue
         ? createOptimisticIssueComment({
             companyId: issue.companyId,
@@ -2607,6 +2612,38 @@ export function IssueDetail() {
     },
   });
 
+  const submitInteractionVerdicts = useMutation({
+    mutationFn: ({
+      interaction,
+      verdicts,
+    }: {
+      interaction: RequestItemVerdictsInteraction;
+      verdicts: { id: string; verdict: RequestItemVerdictValue; reason?: string }[];
+    }) => issuesApi.submitInteractionVerdicts(issueId!, interaction.id, verdicts),
+    onSuccess: (interaction, variables) => {
+      upsertInteractionInCache(interaction);
+      invalidateIssueDetail();
+      invalidateIssueCollections();
+      const applied = variables.verdicts.length;
+      const complete = interaction.kind === "request_item_verdicts"
+        ? interaction.result?.complete ?? false
+        : false;
+      pushToast({
+        title: complete
+          ? "All verdicts applied"
+          : `Applied ${applied} decision${applied === 1 ? "" : "s"}`,
+        tone: "success",
+      });
+    },
+    onError: (err) => {
+      pushToast({
+        title: "Apply failed",
+        body: err instanceof Error ? err.message : "Unable to apply the verdicts",
+        tone: "error",
+      });
+    },
+  });
+
   const cancelInteraction = useMutation({
     mutationFn: ({ interaction }: { interaction: AskUserQuestionsInteraction }) =>
       issuesApi.cancelInteraction(issueId!, interaction.id),
@@ -2652,7 +2689,9 @@ export function IssueDetail() {
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.detail(issueId!) });
 
       const previousIssue = queryClient.getQueryData<Issue>(queryKeys.issues.detail(issueId!));
-      const queuedComment = !interrupt ? readIssueRunStateFromCache(queryClient, issueId!, issue).runningIssueRun : null;
+      const queuedComment = !interrupt
+        ? readIssueRunStateFromCache(queryClient, issueId!, issue).interruptibleIssueRun
+        : null;
       const optimisticComment = issue
         ? createOptimisticIssueComment({
             companyId: issue.companyId,
@@ -2772,11 +2811,11 @@ export function IssueDetail() {
         previousRunState.find((state) => state.activeRun)?.activeRun ??
         null;
       const liveRunList = dedupeLiveRunsById(previousRunState.flatMap((state) => state.liveRuns ?? []));
-      const runningIssueRun = resolveRunningIssueRun(cachedActiveRun, liveRunList);
+      const interruptibleIssueRun = resolveInterruptibleIssueRun(cachedActiveRun, liveRunList);
       const targetRun =
         cachedActiveRun?.id === runId
           ? cachedActiveRun
-          : liveRunList?.find((run) => run.id === runId) ?? runningIssueRun ?? null;
+          : liveRunList?.find((run) => run.id === runId) ?? interruptibleIssueRun ?? null;
 
       if (targetRun) {
         const interruptedAt = new Date().toISOString();
@@ -3036,10 +3075,11 @@ export function IssueDetail() {
     mutationFn: (id: string) => issuesApi.archiveFromInbox(id),
     onMutate: async (id) => {
       if (!selectedCompanyId) return { previousData: [] as InboxIssueCacheSnapshot };
+      beginLocalInboxArchive(selectedCompanyId, id);
       await cancelInboxIssueQueries(queryClient, selectedCompanyId);
       const previousData = snapshotInboxIssueCaches(queryClient, selectedCompanyId);
       removeIssueFromInboxCaches(queryClient, selectedCompanyId, id);
-      return { previousData };
+      return { companyId: selectedCompanyId, previousData };
     },
     onSuccess: (_data, id) => {
       if (selectedCompanyId) {
@@ -3050,6 +3090,7 @@ export function IssueDetail() {
       pushToast({ title: "Task archived from inbox", tone: "success" });
     },
     onError: (err, id, context) => {
+      if (context?.companyId) clearLocalInboxArchive(context.companyId, id);
       if (context?.previousData) {
         restoreIssueToInboxCaches(queryClient, context.previousData, id);
       }
@@ -3059,8 +3100,14 @@ export function IssueDetail() {
         tone: "error",
       });
     },
-    onSettled: () => {
-      if (selectedCompanyId) invalidateInboxIssueQueries(queryClient, selectedCompanyId);
+    onSettled: async (_data, error, id, context) => {
+      if (!context?.companyId) return;
+      if (!error) boundLocalInboxArchive(context.companyId, id);
+      await invalidateInboxIssueQueries(queryClient, context.companyId);
+      if (!error) {
+        const presence = getIssuePresenceInActiveInboxCaches(queryClient, context.companyId, id);
+        if (presence !== "unknown") confirmLocalInboxArchive(context.companyId, id);
+      }
     },
   });
 
@@ -3068,9 +3115,9 @@ export function IssueDetail() {
     setBreadcrumbs([
       sourceBreadcrumb,
       {
-        label: hasLiveRuns ? `🔵 ${breadcrumbTitle}` : breadcrumbTitle,
-        // Prepend the task's status glyph (lg/20px) to the breadcrumb so the
-        // current task's state reads at a glance.
+        // The status glyph (leading) already conveys in-progress/live state;
+        // no redundant 🔵 emoji prefix on the title.
+        label: breadcrumbTitle,
         leading: breadcrumbStatusLeading,
         leadingKey: breadcrumbStatusKey,
       },
@@ -3142,6 +3189,8 @@ export function IssueDetail() {
         externalObjectsLoading={externalObjectsState.isEnabled ? externalObjectsState.isLoading : undefined}
         externalObjectsError={externalObjectsState.isEnabled ? externalObjectsState.isError : undefined}
         onRetryExternalObjects={externalObjectsState.isEnabled ? externalObjectsState.refetch : undefined}
+        onCheckMonitorNow={() => checkIssueMonitorNow.mutate()}
+        checkingMonitorNow={checkIssueMonitorNow.isPending}
       />
     );
     return () => closePanel();
@@ -3154,6 +3203,8 @@ export function IssueDetail() {
     panelChildIssues,
     panelIssue,
     resolvedHasActiveRun,
+    checkIssueMonitorNow.isPending,
+    checkIssueMonitorNow.mutate,
     externalObjectsState.isEnabled,
     externalObjectsState.groups,
     externalObjectsState.isLoading,
@@ -3608,6 +3659,12 @@ export function IssueDetail() {
   const handleCancelInteraction = useCallback(async (interaction: AskUserQuestionsInteraction) => {
     await cancelInteraction.mutateAsync({ interaction });
   }, [cancelInteraction]);
+  const handleSubmitInteractionVerdicts = useCallback(async (
+    interaction: RequestItemVerdictsInteraction,
+    verdicts: { id: string; verdict: RequestItemVerdictValue; reason?: string }[],
+  ) => {
+    await submitInteractionVerdicts.mutateAsync({ interaction, verdicts });
+  }, [submitInteractionVerdicts]);
   const canResumeFromBacklog = issue?.status === "backlog" && Boolean(issue.assigneeAgentId || issue.assigneeUserId);
   const handleResumeFromBacklog = useCallback(async () => {
     await updateIssue.mutateAsync({ status: "todo" });
@@ -3715,21 +3772,30 @@ export function IssueDetail() {
     mutationFn: async (
       input:
         | { workspaceId: string; mode: "forward" }
-        | { workspaceId: string; mode: "override"; reason: string },
+        | { workspaceId: string; mode: "override"; reason: string }
+        | { workspaceId: string; mode: "quarantine_restore" },
     ) => {
       const { workspaceId, ...body } = input;
       return executionWorkspacesApi.reconcile(workspaceId, body);
     },
-    onSuccess: () => {
+    onSuccess: (_result, variables) => {
       // Refresh the detail card itself (not just the list collections): a successful reconcile
       // clears the active recovery action, so the card must re-fetch to stop showing stale actions.
       invalidateIssueDetail();
       invalidateIssueCollections();
-      pushToast({
-        title: "Workspace branch reconciled",
-        body: "The recorded branch now matches the live branch; the task will resume.",
-        tone: "success",
-      });
+      pushToast(
+        variables.mode === "quarantine_restore"
+          ? {
+              title: "Workspace repaired",
+              body: "Dirty changes were quarantined onto a rescue branch and the recorded branch restored; the task will resume.",
+              tone: "success",
+            }
+          : {
+              title: "Workspace branch reconciled",
+              body: "The recorded branch now matches the live branch; the task will resume.",
+              tone: "success",
+            },
+      );
     },
     onError: (err) => {
       pushToast({
@@ -3779,6 +3845,22 @@ export function IssueDetail() {
     },
     [reconcileExecutionWorkspaceId, reconcileRecoveryAction.mutateAsync, pushToast],
   );
+  // Repair action (workspace_validation, dirty divergence): quarantine the dirty worktree onto a
+  // rescue branch and restore the recorded branch. Lossless — no reason required.
+  const handleQuarantineRestoreRecoveryAction = useCallback(() => {
+    if (!reconcileExecutionWorkspaceId) {
+      pushToast({
+        title: "Repair failed",
+        body: "This task has no execution workspace to repair.",
+        tone: "error",
+      });
+      return;
+    }
+    void reconcileRecoveryAction.mutateAsync({
+      workspaceId: reconcileExecutionWorkspaceId,
+      mode: "quarantine_restore",
+    });
+  }, [reconcileExecutionWorkspaceId, reconcileRecoveryAction.mutateAsync, pushToast]);
 
   const treePreviewAffectedIssues = useMemo(
     () => (treeControlPreview?.issues ?? []).filter((candidate) => !candidate.skipped),
@@ -4106,7 +4188,7 @@ export function IssueDetail() {
           <span className="text-sm font-mono text-muted-foreground shrink-0">{issue.identifier ?? issue.id.slice(0, 8)}</span>
 
           {hasLiveRuns && (
-            <Badge variant="outline" className="gap-1.5 bg-blue-500/10 border-blue-500/30 text-(length:--text-nano) text-blue-600 dark:text-blue-400">
+            <Badge variant="outline" className={cn("gap-1.5 text-(length:--text-nano)", liveBlueBadge)}>
               <span className="relative flex h-1.5 w-1.5">
                 <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
                 <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-blue-500" />
@@ -4415,6 +4497,12 @@ export function IssueDetail() {
           className="text-xl font-bold"
         />
 
+        <IssueMonitorBanner
+          issue={issue}
+          onCheckNow={() => checkIssueMonitorNow.mutate()}
+          checkingNow={checkIssueMonitorNow.isPending}
+        />
+
         <InlineEditor
           value={issue.description ?? ""}
           onSave={(description) => updateIssue.mutateAsync({ description })}
@@ -4666,6 +4754,7 @@ export function IssueDetail() {
               issueWorkMode={issue.workMode ?? "standard"}
               executionRunId={issue.executionRunId ?? null}
               blockedBy={issue.blockedBy ?? []}
+              liveIssueIds={liveIssueIds}
               blockerAttention={issue.blockerAttention ?? null}
               successfulRunHandoff={issue.successfulRunHandoff ?? null}
               scheduledRetry={issue.scheduledRetry ?? null}
@@ -4675,6 +4764,8 @@ export function IssueDetail() {
               reissueIsolatedRecoveryActionPending={reissueIsolatedRecoveryAction.isPending}
               onReconcileForwardRecoveryAction={handleReconcileForwardRecoveryAction}
               onBreakGlassOverrideRecoveryAction={handleBreakGlassOverrideRecoveryAction}
+              onQuarantineRestoreRecoveryAction={handleQuarantineRestoreRecoveryAction}
+              quarantineRestoreRecoveryActionPending={reconcileRecoveryAction.isPending}
               canBreakGlassRecoveryAction={canManageBoardRuntime}
               reconcileRecoveryActionPending={reconcileRecoveryAction.isPending}
               canFalsePositiveRecoveryAction={canResolveBoardRecoveryAction}
@@ -4687,6 +4778,15 @@ export function IssueDetail() {
               onLoadOlderComments={loadOlderComments}
               onRefreshLatestComments={refetchLatestComments}
               composerRef={commentComposerRef}
+              composerAccessory={
+                hasVisibleMonitorSurface(issue) ? (
+                  <IssueMonitorComposerStrip
+                    issue={issue}
+                    onCheckNow={() => checkIssueMonitorNow.mutate()}
+                    checkingNow={checkIssueMonitorNow.isPending}
+                  />
+                ) : null
+              }
               footer={
                 siblingNavigation ? (
                   <IssueSiblingNavigation
@@ -4733,12 +4833,14 @@ export function IssueDetail() {
               onRejectInteraction={handleRejectInteraction}
               onSubmitInteractionAnswers={handleSubmitInteractionAnswers}
               onCancelInteraction={handleCancelInteraction}
+              onSubmitInteractionVerdicts={handleSubmitInteractionVerdicts}
               assigneeUserId={issue.assigneeUserId ?? null}
               onResumeFromBacklog={canResumeFromBacklog ? handleResumeFromBacklog : undefined}
               resumeFromBacklogPending={
                 updateIssue.isPending && updateIssue.variables?.status === "todo"
               }
               externalReferences={externalObjectsState.isEnabled ? externalObjectsState.markdownReferences : undefined}
+              linkCaseReferences={casesChipsEnabled}
             />
           ) : null}
         </TabsContent>
@@ -4760,8 +4862,6 @@ export function IssueDetail() {
               onApprovalAction={(approvalId, action) => {
                 approvalDecision.mutate({ approvalId, action });
               }}
-              onCheckMonitorNow={() => checkIssueMonitorNow.mutate()}
-              checkingMonitorNow={checkIssueMonitorNow.isPending}
               externalReferences={externalObjectsState.isEnabled ? externalObjectsState.markdownReferences : undefined}
             />
           ) : null}
@@ -4967,6 +5067,8 @@ export function IssueDetail() {
                 externalObjectsLoading={externalObjectsState.isEnabled ? externalObjectsState.isLoading : undefined}
                 externalObjectsError={externalObjectsState.isEnabled ? externalObjectsState.isError : undefined}
                 onRetryExternalObjects={externalObjectsState.isEnabled ? externalObjectsState.refetch : undefined}
+                onCheckMonitorNow={() => checkIssueMonitorNow.mutate()}
+                checkingMonitorNow={checkIssueMonitorNow.isPending}
               />
             </div>
           </ScrollArea>

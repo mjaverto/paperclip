@@ -1,12 +1,30 @@
 export { companyService } from "./companies.js";
 export { companyArtifactsService } from "./company-artifacts.js";
 export { companySearchService } from "./company-search.js";
+export { companySearchExtractService } from "./company-search-extract.js";
 export { feedbackService } from "./feedback.js";
 export { companySkillService } from "./company-skills.js";
+export { companySkillPolicyService, normalizeSkillPolicySourceType } from "./company-skill-policy.js";
+export { folderService } from "./folders.js";
 export { agentService, deduplicateAgentName } from "./agents.js";
+export {
+  builtInAgentService,
+  deriveBuiltInAgentStatus,
+  getBuiltInAgentDefinition,
+  listBuiltInAgentDefinitions,
+  reconcileBuiltInAgentsOnStartup,
+  validateBuiltInAgentDefinitions,
+  type BuiltInAgentDefinition,
+  type BuiltInManagedResourceState,
+  type BuiltInManagedResourceStockStatus,
+  type BuiltInAgentState,
+  type BuiltInAgentStatus,
+} from "./built-in-agents.js";
 export { agentInstructionsService, syncInstructionsBundleConfigFromFilePath } from "./agent-instructions.js";
 export { assetService } from "./assets.js";
 export { documentService, extractLegacyPlanBody } from "./documents.js";
+export { statusCardService } from "./status-cards.js";
+export { finalizeStatusCardsForStalledGeneration } from "./status-card-finalization.js";
 export { documentAnnotationService } from "./document-annotations.js";
 export {
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
@@ -45,6 +63,8 @@ export {
 export { goalService } from "./goals.js";
 export { activityService, type ActivityFilters } from "./activity.js";
 export { workTimelineService, normalizeTimelineWindow } from "./work-timeline.js";
+export { attentionService } from "./attention.js";
+export { captureDecisionSnapshot, decisionTrainingService } from "./decision-training.js";
 export type {
   WorkTimelineActor,
   WorkTimelineEdge,
@@ -56,6 +76,10 @@ export type {
 export { approvalService } from "./approvals.js";
 export { budgetService } from "./budgets.js";
 export { secretService } from "./secrets.js";
+export { googleSheetsRobotEmailFromEnv, toolAccessService } from "./tool-access.js";
+export { smokeLabService } from "./smoke-lab.js";
+export { backfillLegacyToolOAuthTokens } from "./tool-oauth-legacy-backfill.js";
+export { toolAccessPolicyService } from "./tool-access-policy.js";
 export { routineService } from "./routines.js";
 export { costService } from "./costs.js";
 export { financeService } from "./finance.js";
@@ -78,6 +102,7 @@ export {
   type PrincipalAccessCompatibilityBackfillStats,
 } from "./principal-access-compatibility.js";
 export { authorizationService } from "./authorization.js";
+export { inboxAgentPolicyService } from "./inbox-agent-policy.js";
 export type {
   AuthorizationAction,
   AuthorizationActor,
@@ -85,7 +110,14 @@ export type {
   AuthorizationResource,
 } from "./authorization.js";
 export { boardAuthService } from "./board-auth.js";
-export { instanceSettingsService } from "./instance-settings.js";
+export { instanceSettingsService, applyManagedExperimentalOverlay } from "./instance-settings.js";
+export {
+  getManagedInstanceConfig,
+  managedFeatureKeySet,
+  parseManagedConfigEnv,
+  MANAGED_CONFIG_ENV_KEY,
+  type ManagedInstanceConfig,
+} from "./managed-config.js";
 export { bootstrapExecutionPolicyFromEnv } from "./execution-policy-bootstrap.js";
 export { cloudUpstreamService, reconcileCloudUpstreamRunsOnStartup } from "./cloud-upstreams.js";
 export { companyPortabilityService } from "./company-portability.js";
@@ -114,6 +146,7 @@ export { workspaceOperationService } from "./workspace-operations.js";
 export { workspaceFileResourceService } from "./workspace-file-resources.js";
 export { workProductService } from "./work-products.js";
 export { logActivity, type LogActivityInput } from "./activity-log.js";
+export { summarySlotService, SUMMARIZER_BUILT_IN_KEY } from "./summary-slots.js";
 export { notifyHireApproved, type NotifyHireApprovedInput } from "./hire-hook.js";
 export { publishLiveEvent, subscribeCompanyLiveEvents } from "./live-events.js";
 export {
