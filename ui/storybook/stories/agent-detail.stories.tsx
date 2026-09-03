@@ -127,6 +127,7 @@ const budgetOverviewFixture: BudgetOverview = {
   pausedAgentCount: 0,
   pausedProjectCount: 0,
   pendingApprovalCount: 0,
+  unpricedRunCount: 0,
 };
 
 function seedAgentDetailData(queryClient: QueryClient) {

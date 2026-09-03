@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   BookOpen,
   LogOut,
   Megaphone,
+  Settings,
   type LucideIcon,
   UserRound,
   UserRoundPen,
@@ -12,6 +13,7 @@ import type { DeploymentMode, ServerGitInfo } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { authApi } from "@/api/auth";
 import { queryKeys } from "@/lib/queryKeys";
+import { useSignOut } from "@/hooks/useSignOut";
 import { useSidebar } from "../context/SidebarContext";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -32,6 +34,8 @@ interface SidebarAccountMenuProps {
   onOpenChange?: (open: boolean) => void;
   serverGit?: ServerGitInfo;
   version?: string | null;
+  /** Contextual navigation occupies a full sidebar even if the saved global nav mode is collapsed. */
+  forceExpanded?: boolean;
 }
 
 interface MenuActionProps {
@@ -115,11 +119,11 @@ export function SidebarAccountMenu({
   onOpenChange,
   serverGit,
   version,
+  forceExpanded = false,
 }: SidebarAccountMenuProps) {
   const [internalOpen, setInternalOpen] = useState(false);
-  const queryClient = useQueryClient();
   const { isMobile, setSidebarOpen, collapsed, peeking } = useSidebar();
-  const rail = collapsed && !peeking;
+  const rail = collapsed && !peeking && !forceExpanded;
   const open = controlledOpen ?? internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
   const { data: session } = useQuery({
@@ -128,14 +132,7 @@ export function SidebarAccountMenu({
     retry: false,
   });
 
-  const signOutMutation = useMutation({
-    mutationFn: () => authApi.signOut(),
-    onSuccess: async () => {
-      setOpen(false);
-      await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.health });
-    },
-  });
+  const signOutMutation = useSignOut({ onSignedOut: closeNavigationChrome });
 
   const displayName = session?.user.name?.trim() || "Board";
   const secondaryLabel =
@@ -155,8 +152,12 @@ export function SidebarAccountMenu({
     if (isMobile) setSidebarOpen(false);
   }
 
+  function handleSignOut() {
+    signOutMutation.mutate();
+  }
+
   return (
-    <div className="border-t border-r border-border bg-background px-3 py-2">
+    <div className="bg-border/50 px-3 py-2 dark:bg-muted">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <button
@@ -226,6 +227,13 @@ export function SidebarAccountMenu({
 
             <div className="mt-4 space-y-1">
               <MenuAction
+                label="Settings"
+                description="Manage company and instance settings."
+                icon={Settings}
+                href="/company/settings"
+                onClick={closeNavigationChrome}
+              />
+              <MenuAction
                 label="View profile"
                 description="Open your activity, task, and usage ledger."
                 icon={UserRound}
@@ -263,7 +271,7 @@ export function SidebarAccountMenu({
                     "flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition-colors hover:bg-destructive/10",
                     signOutMutation.isPending && "cursor-not-allowed opacity-60",
                   )}
-                  onClick={() => signOutMutation.mutate()}
+                  onClick={handleSignOut}
                   disabled={signOutMutation.isPending}
                 >
                   <span className="mt-0.5 rounded-lg border border-border bg-background/70 p-2 text-muted-foreground">
