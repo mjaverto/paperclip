@@ -27,6 +27,7 @@ COPY packages/mcp-server/package.json packages/mcp-server/
 COPY packages/paperclip-eval-kernel/package.json packages/paperclip-eval-kernel/
 COPY packages/paperclip-runner/package.json packages/paperclip-runner/
 COPY packages/skills-catalog/package.json packages/skills-catalog/
+COPY packages/pricing/package.json packages/pricing/
 COPY packages/tailscale-https-broker/package.json packages/tailscale-https-broker/
 COPY packages/teams-catalog/package.json packages/teams-catalog/
 COPY packages/adapters/claude-local/package.json packages/adapters/claude-local/

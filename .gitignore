@@ -21,6 +21,8 @@ coverage/
 .AppleDouble
 .LSOverride
 data/
+!packages/pricing/data/
+!packages/pricing/data/**
 .paperclip/
 .pnpm-store/
 tmp-*

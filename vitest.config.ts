@@ -8,6 +8,7 @@ export default defineConfig({
     projects: [
       "packages/shared",
       "packages/skills-catalog",
+      "packages/pricing",
       "packages/db",
       "packages/adapter-utils",
       "packages/adapters/claude-local",
