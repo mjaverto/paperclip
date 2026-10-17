@@ -1426,7 +1426,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
         : adapterType === "opencode_local"
           ? "variant"
           : adapterType === "grok_local" ? "reasoningEffort"
-          : adapterType === "pi_local" ? "thinking" : "effort";
+          : adapterType === "omp_local" || adapterType === "pi_local" ? "thinking" : "effort";
   const thinkingEffortOptions =
     isCodexHarness
       ? codexReasoningEffortOptions(currentModelId, "Auto").map((option) => ({
@@ -1439,6 +1439,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           ? openCodeThinkingEffortOptions
           : adapterType === "kimi_local"
             ? kimiThinkingEffortOptions
+            : adapterType === "omp_local"
+              ? [{ id: "", label: "Default" }, ...["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"].map(id => ({ id, label: id }))]
             : adapterType === "pi_local"
               ? [{ id: "", label: "Auto" }, ...["off", "minimal", "low", "medium", "high", "xhigh"].map(id => ({ id, label: id }))]
               : harnessType === "claude_local" || adapterType === "grok_local"
@@ -1951,9 +1953,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 open={modelOpen}
                 onOpenChange={setModelOpen}
                 defaultLabel={adapterType === "claude_local" ? `Default (${DEFAULT_CLAUDE_LOCAL_MODEL})` : undefined}
-                allowDefault={adapterType !== "opencode_local" && adapterType !== "pi_local" && adapterType !== "paperclip_runner"}
-                required={adapterType === "opencode_local" || adapterType === "pi_local"}
-                groupByProvider={!connectionModels && (adapterType === "opencode_local" || adapterType === "pi_local")}
+                allowDefault={adapterType !== "opencode_local" && adapterType !== "omp_local" && adapterType !== "pi_local" && adapterType !== "paperclip_runner"}
+                required={adapterType === "opencode_local" || adapterType === "omp_local" || adapterType === "pi_local"}
+                groupByProvider={!connectionModels && (adapterType === "opencode_local" || adapterType === "omp_local" || adapterType === "pi_local")}
                 preserveOrder={Boolean(connectionModels) || adapterCuratesModelOrder(adapterType)}
                 creatable
                 detectedModel={connectionModels ? undefined : detectedModel}
@@ -2107,6 +2109,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                         codex_local: "codex",
                         gemini_local: "gemini",
                         kimi_local: "kimi",
+                        omp_local: "omp",
                         pi_local: "pi",
                         cursor: "agent",
                         opencode_local: "opencode",

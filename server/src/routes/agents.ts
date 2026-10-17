@@ -558,6 +558,7 @@ export function agentRoutes(
     kimi_local: "instructionsFilePath",
     opencode_local: "instructionsFilePath",
     cursor: "instructionsFilePath",
+    omp_local: "instructionsFilePath",
     pi_local: "instructionsFilePath",
   };
   const DEFAULT_MANAGED_INSTRUCTIONS_ADAPTER_TYPES = new Set(Object.keys(DEFAULT_INSTRUCTIONS_PATH_KEYS));
@@ -2798,6 +2799,7 @@ export function agentRoutes(
   const LEGACY_MATERIALIZED_SKILLS_SET = new Set([
     "cursor",
     "gemini_local",
+    "omp_local",
     "opencode_local",
     "pi_local",
   ]);

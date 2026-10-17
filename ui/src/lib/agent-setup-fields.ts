@@ -34,6 +34,8 @@ export function setupEfforts(adapter: string, model = ""): string[] {
       return codexReasoningEffortOptions(model || DEFAULT_CODEX_LOCAL_MODEL)
         .map((option) => option.value)
         .filter(Boolean);
+    case "omp_local":
+      return ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
     case "pi_local":
       return ["off", "minimal", "low", "medium", "high", "xhigh"];
     case "grok_local":
