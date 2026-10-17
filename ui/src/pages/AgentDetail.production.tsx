@@ -373,7 +373,7 @@ function runMetrics(run: HeartbeatRun) {
     "cache_read_input_tokens",
   );
   const cost =
-    visibleRunCostUsd(usage, result);
+    visibleRunCostUsd(usage, result) ?? 0;
   const provider = asNonEmptyString(usage?.provider) ?? null;
   const model = asNonEmptyString(usage?.model) ?? null;
   return {
@@ -952,6 +952,7 @@ export function AgentDetail() {
       pauseReason: agent?.pauseReason ?? null,
       windowStart: new Date(),
       windowEnd: new Date(),
+      unpricedRunCount: 0,
     } satisfies BudgetPolicySummary;
   }, [agent, budgetOverview?.policies, resolvedCompanyId, routeAgentRef]);
   const mobileLiveRun = useMemo(

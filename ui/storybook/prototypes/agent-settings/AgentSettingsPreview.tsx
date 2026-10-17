@@ -364,6 +364,7 @@ function SettingsPage({ runtimeContent }: { runtimeContent?: ReactNode }) {
                 <AgentOverview
                   agent={agent}
                   runs={[]}
+                  runStats={[]}
                   assignedIssues={storybookIssues.slice(0, 3)}
                   directReportCount={0}
                   skillNames={library

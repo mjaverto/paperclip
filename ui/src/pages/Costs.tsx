@@ -632,6 +632,12 @@ export function Costs({
   }, [byBiller]);
 
   const topFinanceEvents = (financeData?.events ?? []) as FinanceEvent[];
+  const inferenceTokenTotal =
+    (spendData?.byAgent ?? []).reduce(
+      (sum, row) => sum + row.inputTokens + row.cachedInputTokens + row.outputTokens,
+      0,
+    );
+
   const budgetPolicies = budgetData?.policies ?? [];
   const activeBudgetIncidents = budgetData?.activeIncidents ?? [];
   const budgetPoliciesByScope = useMemo(() => ({

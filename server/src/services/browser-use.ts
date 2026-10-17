@@ -957,7 +957,7 @@ export function browserUseService(
         biller: "browser-use-cloud",
         provider: "browser-use-cloud",
         model: e.model,
-        amountCents: e.costCents,
+        amountCents: e.costCents ?? 0,
         currency: "USD",
         description: "Browser Use agent run",
         occurredAt: e.occurredAt,

@@ -58,6 +58,19 @@ export function BillerSpendCard({
     providerBudgetShare > 0
       ? Math.min(100, (row.costCents / providerBudgetShare) * 100)
       : 0;
+  const unpricedSuffix = (count: number) => {
+    if (count <= 0) return null;
+    const label = count === 1 ? "1 run unpriced" : `${count} runs unpriced`;
+    return (
+      <span
+        className="ml-1 text-xs font-normal text-muted-foreground"
+        aria-label="Cost data not available for these runs; total may be undercount."
+      >
+        ({label})
+      </span>
+    );
+  };
+
 
   return (
     <Card>

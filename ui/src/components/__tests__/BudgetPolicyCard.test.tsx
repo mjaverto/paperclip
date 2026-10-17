@@ -31,6 +31,9 @@ const baseSummary: BudgetPolicySummary = {
   pauseReason: null,
   windowStart: new Date("2026-04-01T00:00:00.000Z"),
   windowEnd: new Date("2026-05-01T00:00:00.000Z"),
+  unpricedEventCount: 0,
+  pendingRunCount: 0,
+  "unpricedUsagePolicy": "block" as const,
   unpricedRunCount: 0,
 };
 

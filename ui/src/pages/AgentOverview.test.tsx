@@ -57,6 +57,7 @@ describe("AgentOverview", () => {
         <AgentOverview
           agent={agent}
           runs={[] as HeartbeatRun[]}
+          runStats={[]}
           assignedIssues={[issue]}
           runtimeState={runtime}
           directReportCount={2}
@@ -101,6 +102,7 @@ describe("AgentOverview", () => {
         <AgentOverview
           agent={agent}
           runs={[] as HeartbeatRun[]}
+          runStats={[]}
           assignedIssues={[]}
           directReportCount={0}
           skillNames={[]}

@@ -198,7 +198,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
       if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
 
-      const [{ total, totalExact, eventCount, unpricedEventCount, estimatedEventCount, unknownBillingEventCount, unpricedRunCount }] = await db
+      const [{ total, totalExact, eventCount, unpricedEventCount, estimatedEventCount, unknownBillingEventCount, unpricedRunCount: unpricedRunCountValue }] = await db
         .select({
           eventCount: sql<number>`count(*)::int`,
           estimatedEventCount: sql<number>`count(*) filter (where ${costEvents.costStatus} = 'estimated')::int`,
@@ -235,7 +235,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         spendCentsExact: normalizeCents(totalExact),
         budgetCents: company.budgetMonthlyCents,
         utilizationPercent: Number(utilization.toFixed(2)),
-        unpricedRunCount,
+        unpricedRunCount: unpricedRunCountValue,
       };
     }),
 

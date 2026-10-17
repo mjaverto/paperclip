@@ -4,7 +4,7 @@ import { GrokBotWorkSummary } from "@/components/GrokBotWorkSummary";
 import { PrimaryAgentIndicator, SetPrimaryAgentButton } from "@/components/primary-agent/PrimaryAgentPresentation";
 import { AiConnectionPoolRunDetails } from "@/components/ai-connections/AiConnectionPoolRunDetails";
 import { AgentConnectionInstructions } from "@/features/connections/ConnectionInstructions";
-import type { AgentInstructionCandidate, AgentInstructionsBundle } from "@paperclipai/shared";
+import type { AgentInstructionCandidate, AgentInstructionsBundle, BudgetPolicySummary } from "@paperclipai/shared";
 import { InstructionHistory } from "../components/InstructionHistory";
 import { AgentCharacter } from "../components/AgentCharacter";
 import { characterStateForAgent } from "@paperclipai/shared";
@@ -41,6 +41,8 @@ import { copyTextToClipboard } from "../lib/clipboard";
 import { AgentSkillsTab } from "./agent-skills/AgentSkillsTab";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { agentDisplayAdapterType, getAdapterDisplay } from "../adapters/adapter-display-registry";
+import { formatCents } from "../lib/utils";
+import { budgetsApi } from "../api/budgets";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { useAdapterCapabilities } from "@/adapters/use-adapter-capabilities";
@@ -959,6 +961,14 @@ export function AgentDetail() {
     enabled: !!resolvedCompanyId && needsOverviewData,
   });
 
+  const { data: budgetOverview } = useQuery({
+    queryKey: queryKeys.budgets.overview(resolvedCompanyId ?? "__none__"),
+    queryFn: () => budgetsApi.overview(resolvedCompanyId!),
+    enabled: !!resolvedCompanyId,
+    refetchInterval: 30_000,
+    staleTime: 5_000,
+  });
+
   const { data: skillSnapshot } = useQuery({
     queryKey: queryKeys.agents.skills(resolvedAgentId ?? "__none__"),
     queryFn: () => agentsApi.skills(resolvedAgentId!, resolvedCompanyId ?? undefined),
@@ -1011,6 +1021,9 @@ export function AgentDetail() {
       pauseReason: agent?.pauseReason ?? null,
       windowStart: new Date(),
       windowEnd: new Date(),
+      unpricedEventCount: 0,
+      pendingRunCount: 0,
+      unpricedUsagePolicy: "block" as const,
       unpricedRunCount: 0,
     } satisfies BudgetPolicySummary;
   }, [agent, budgetOverview?.policies, resolvedCompanyId, routeAgentRef]);
@@ -1553,6 +1566,9 @@ export function AgentDetail() {
       {activeView === "run-detail" && (
         <RunsTab
           runs={heartbeats ?? []}
+          hasNextPage={hasNextPage}
+          fetchNextPage={fetchNextPage}
+          isFetchingNextPage={isFetchingNextPage}
           companyId={resolvedCompanyId!}
           agentId={agent.id}
           agentRouteId={canonicalAgentRef}
@@ -2067,6 +2083,10 @@ function CostsSection({
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
 /* ---- Agent Configure Page ---- */
 
 /**
@@ -3484,7 +3504,7 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
           {summary.slice(0, 60)}
         </span>
       )}
-      {(metrics.totalTokens > 0 || metrics.cost > 0) && (
+      {(metrics.totalTokens > 0 || (metrics.cost ?? 0) > 0) && (
         <div className="flex items-center gap-2 pl-5.5 text-(length:--text-micro) text-muted-foreground tabular-nums">
           {metrics.totalTokens > 0 && <span>{formatTokens(metrics.totalTokens)} tok</span>}
           {metrics.cost == null
@@ -3500,6 +3520,9 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
 
 export function RunsTab({
   runs,
+  hasNextPage,
+  fetchNextPage,
+  isFetchingNextPage,
   companyId,
   agentId,
   agentRouteId,
@@ -3508,6 +3531,9 @@ export function RunsTab({
   adapterConfig,
 }: {
   runs: HeartbeatRun[];
+  hasNextPage?: boolean;
+  fetchNextPage?: () => void;
+  isFetchingNextPage?: boolean;
   companyId: string;
   agentId: string;
   agentRouteId: string;

@@ -1263,6 +1263,7 @@ export function computeInboxBadgeData({
   joinRequests,
   dashboard,
   heartbeatRuns,
+  latestFailedRuns,
   mineIssues,
   dismissedAlerts,
   dismissedAtByKey,
@@ -1271,7 +1272,10 @@ export function computeInboxBadgeData({
   approvals: Approval[];
   joinRequests: JoinRequest[];
   dashboard: DashboardSummary | undefined;
-  heartbeatRuns: HeartbeatRun[];
+  heartbeatRuns?: HeartbeatRun[];
+  /** Optimized source: the pre-filtered `/latest-failed` list. When provided,
+   * the badge derives failed-run counts from it instead of the full run list. */
+  latestFailedRuns?: HeartbeatRun[];
   mineIssues: Issue[];
   dismissedAlerts: Set<string>;
   dismissedAtByKey: ReadonlyMap<string, number>;
@@ -1283,7 +1287,8 @@ export function computeInboxBadgeData({
       ACTIONABLE_APPROVAL_STATUSES.has(approval.status) &&
       !isInboxEntityDismissed(dismissedAtByKey, `approval:${approval.id}`, approval.updatedAt),
   ).length;
-  const visibleFailedRuns = getLatestFailedRunsByAgent(heartbeatRuns).filter(
+  const failedSource = latestFailedRuns ?? getLatestFailedRunsByAgent(heartbeatRuns ?? []);
+  const visibleFailedRuns = failedSource.filter(
     (run) => !isInboxEntityDismissed(dismissedAtByKey, `run:${run.id}`, run.createdAt),
   );
   const failedRuns = visibleFailedRuns.filter((run) => isHeartbeatRunVisibleInMine(run, currentUserId)).length;

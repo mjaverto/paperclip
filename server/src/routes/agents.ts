@@ -1,5 +1,6 @@
 import { cancellationRequestId } from "../services/native-runtime/native-cancellation-request.js";
-import { agentHarnessType, type AgentRunnerChoice } from "@paperclipai/shared";
+
+import { listRunIdentityContexts } from "../services/run-identity.js";import { agentHarnessType, type AgentRunnerChoice } from "@paperclipai/shared";
 import { resolveNewAgentRunnerForCompany } from "../services/agent-runner-selection.js";
 import { agentEnvironmentTestService } from "../services/agent-environment-test.js";
 import { createAgentLifecycle } from "../services/agent-lifecycle.js";
@@ -6664,6 +6665,8 @@ export function agentRoutes(
       }
       sendSetupTokenError(res, err);
     }
+  });
+
   router.get("/companies/:companyId/heartbeat-runs/stats", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -7533,4 +7536,3 @@ export function agentRoutes(
 
   return router;
 }
-import { listRunIdentityContexts } from "../services/run-identity.js";

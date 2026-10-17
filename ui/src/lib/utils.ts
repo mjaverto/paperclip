@@ -35,10 +35,12 @@ export function asFiniteNumber(value: unknown, fallback: number) {
 
 export function formatCents(
   cents: number | null | undefined,
-  opts?: { nullDisplay?: string; currency?: string },
+  opts?: { nullDisplay?: string; currency?: string } | string,
 ): string {
-  if (cents == null) return opts?.nullDisplay ?? "—";
-  const currency = opts?.currency ?? "USD";
+  const o: { nullDisplay?: string; currency?: string } | undefined =
+    typeof opts === "string" ? { currency: opts } : opts;
+  if (cents == null) return o?.nullDisplay ?? "—";
+  const currency = o?.currency ?? "USD";
   // Older finance writes accepted arbitrary three-character codes. Keep those
   // amounts readable without passing an invalid currency to Intl.
   if (!/^[a-z]{3}$/i.test(currency)) {

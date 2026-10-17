@@ -136,7 +136,7 @@ async function snapshotCandidates(
 
 interface CandidateRow {
   id: string;
-  agentId: string;
+  agentId: string | null;
   companyId: string;
   provider: string;
   model: string;
@@ -194,7 +194,7 @@ async function listCandidates(
 
 interface PricedCandidate {
   id: string;
-  agentId: string;
+  agentId: string | null;
   newCostCents: number;
 }
 
@@ -405,7 +405,7 @@ export async function runBackfill(
 
   const candidates = await listCandidates(db, options);
   const { priced, unpriced } = priceCandidates(candidates, pricer);
-  const affectedAgentIds = Array.from(new Set(priced.map((p) => p.agentId)));
+  const affectedAgentIds = Array.from(new Set(priced.map((p) => p.agentId).filter((id): id is string => id !== null)));
 
   log(
     JSON.stringify({

@@ -46,7 +46,7 @@ export interface CostSummary {
    * and the pricing service had no entry for the model). Defaults to 0 for
    * backwards compatibility with consumers that pre-date the pricing service.
    */
-  unpricedRunCount: number;
+  unpricedRunCount?: number;
 }
 
 export type CostDataQualityReason = "unknown_billing" | "missing_model" | "missing_price"
@@ -134,7 +134,7 @@ export interface CostByAgent {
   subscriptionInputTokens: number;
   subscriptionOutputTokens: number;
   /** runs in this group whose cost could not be priced. defaults to 0. */
-  unpricedRunCount: number;
+  unpricedRunCount?: number;
 }
 
 export interface CostByProviderModel {
@@ -156,7 +156,7 @@ export interface CostByProviderModel {
   subscriptionInputTokens: number;
   subscriptionOutputTokens: number;
   /** runs in this group whose cost could not be priced. defaults to 0. */
-  unpricedRunCount: number;
+  unpricedRunCount?: number;
 }
 
 export interface CostByBiller {
@@ -177,7 +177,7 @@ export interface CostByBiller {
   providerCount: number;
   modelCount: number;
   /** runs in this group whose cost could not be priced. defaults to 0. */
-  unpricedRunCount: number;
+  unpricedRunCount?: number;
 }
 
 /** per-agent breakdown by provider + model, for identifying token-hungry agents */
@@ -199,7 +199,7 @@ export interface CostByAgentModel {
   cachedInputTokens: number;
   outputTokens: number;
   /** runs in this group whose cost could not be priced. defaults to 0. */
-  unpricedRunCount: number;
+  unpricedRunCount?: number;
 }
 
 /** spend per provider for a fixed rolling time window */
@@ -230,5 +230,5 @@ export interface CostByProject {
   cachedInputTokens: number;
   outputTokens: number;
   /** runs in this group whose cost could not be priced. defaults to 0. */
-  unpricedRunCount: number;
+  unpricedRunCount?: number;
 }

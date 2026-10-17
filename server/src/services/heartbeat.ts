@@ -303,6 +303,7 @@ import {
   notInArray,
   or,
   sql,
+  gt,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -3982,6 +3983,47 @@ export function heartbeatService(
       }
     },
     list: listRuns,
+
+    stats: async (companyId: string, agentId?: string) => {
+      const now = new Date();
+      // Calculate 14 days ago for the trailing activity window
+      const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+
+      const condition = agentId
+        ? and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId), gt(heartbeatRuns.createdAt, fourteenDaysAgo))
+        : and(eq(heartbeatRuns.companyId, companyId), gt(heartbeatRuns.createdAt, fourteenDaysAgo));
+
+      const rows = await db
+        .select({
+          date: sql<string>`DATE(${heartbeatRuns.createdAt})`.as("date"),
+          status: heartbeatRuns.status,
+          count: sql<number>`count(*)`.as("count"),
+        })
+        .from(heartbeatRuns)
+        .where(condition)
+        .groupBy(sql`DATE(${heartbeatRuns.createdAt})`, heartbeatRuns.status);
+
+      return rows.map((r) => ({ ...r, count: Number(r.count) }));
+    },
+
+    latestFailed: async (companyId: string) => {
+      // Get the most recent run for each agent in the company.
+      // DISTINCT ON is a PostgreSQL-specific feature.
+      const latest = await db.execute(sql`
+        SELECT DISTINCT ON (agent_id) id, status
+        FROM heartbeat_runs
+        WHERE company_id = ${companyId}
+        ORDER BY agent_id, created_at DESC
+      `);
+      const latestFailedIds = (latest as unknown as { id: string; status: string }[])
+        .filter((row) => row.status === "failed" || row.status === "timed_out")
+        .map((row) => row.id);
+      if (latestFailedIds.length === 0) return [];
+      const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.id, latestFailedIds));
+      // Distinct ON yields at most one row per agent, so the id list is unique.
+      const byId = new Map(runs.map((run) => [run.id, run]));
+      return latestFailedIds.map((id) => byId.get(id)!).filter(Boolean);
+    },
 
     getRun,
 

@@ -118,6 +118,8 @@ export interface HeartbeatRunListOptions {
 export interface ProviderTraceInspection {
   trace: ProviderTraceMetadata | null;
   entries: Array<Record<string, unknown>>;
+}
+
 export interface HeartbeatRunStats {
   date: string;
   status: string;
