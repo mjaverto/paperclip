@@ -1,6 +1,7 @@
 import { beginIdleTrackedWork } from "./task-admission.js";
 import { priceAnthropicReceipt } from "./anthropic-pricing.js";
 import { priceCodexReceipt } from "./codex-pricing.js";
+import { priceCatalogReceipt } from "./catalog-pricing.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -246,8 +247,10 @@ export async function createRunUsageRecorder(db: Db, input: { companyId: string;
     const attempt = parsed.attemptId ?? currentAttempt;
     if (!attempts.has(attempt)) currentAttempt = attempt;
     const previous = attempts.get(attempt);
-    const priced = priceAnthropicReceipt(priceCodexReceipt({ ...parsed, usage: parsed.usage ?? previous?.usage,
-      complete: parsed.complete && !(previous?.usage && !parsed.usage) }));
+    // The reviewed Anthropic/OpenAI rate cards run first; the vendored catalog only
+    // estimates what they leave unpriced for other providers.
+    const priced = priceCatalogReceipt(priceAnthropicReceipt(priceCodexReceipt({ ...parsed, usage: parsed.usage ?? previous?.usage,
+      complete: parsed.complete && !(previous?.usage && !parsed.usage) })));
     priced.pricingProvenance ??= {
       source: priced.costUsd != null || priced.costUsdExact != null || priced.cacheAdjustedCostUsd != null ? "provider_reported" : "unknown",
       version: "accounting-receipt/v1",
