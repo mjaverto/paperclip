@@ -14,6 +14,7 @@
     { "path": "./packages/adapters/hermes" },
     { "path": "./packages/adapters/openclaw-gateway" },
     { "path": "./packages/adapters/opencode-local" },
+    { "path": "./packages/adapters/omp-local" },
     { "path": "./packages/adapters/pi-local" },
     { "path": "./server" },
     { "path": "./ui" },

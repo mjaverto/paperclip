@@ -1259,6 +1259,7 @@ function OnboardingWizardInner({
     adapterType === "gemini_local" ||
     adapterType === "kimi_local" ||
     adapterType === "opencode_local" ||
+    adapterType === "omp_local" ||
     adapterType === "pi_local" ||
     adapterType === "cursor";
   // Build adapter grids dynamically from the UI registry + display metadata.
@@ -1739,6 +1740,7 @@ function OnboardingWizardInner({
     codex_local: "codex",
     gemini_local: "gemini",
     kimi_local: "kimi",
+    omp_local: "omp",
     pi_local: "pi",
     cursor: "agent",
     opencode_local: "opencode",

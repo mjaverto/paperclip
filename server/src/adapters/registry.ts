@@ -134,6 +134,15 @@ import {
   listPiModels,
 } from "@paperclipai/adapter-pi-local/server";
 import { agentConfigurationDoc as piAgentConfigurationDoc } from "@paperclipai/adapter-pi-local";
+import {
+  execute as ompExecute,
+  listOmpSkills,
+  syncOmpSkills,
+  testEnvironment as ompTestEnvironment,
+  sessionCodec as ompSessionCodec,
+  listOmpModels,
+} from "@paperclipai/adapter-omp-local/server";
+import { agentConfigurationDoc as ompAgentConfigurationDoc } from "@paperclipai/adapter-omp-local";
 import { BUILTIN_ADAPTER_TYPES } from "./builtin-adapter-types.js";
 import { buildExternalAdapters } from "./plugin-loader.js";
 import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
@@ -915,6 +924,27 @@ const openCodeLocalAdapter: ServerAdapterModule = {
   agentConfigurationDoc: openCodeAgentConfigurationDoc,
 };
 
+const ompLocalAdapter: ServerAdapterModule = {
+  type: "omp_local",
+  runtimeToolDelivery: "environment",
+  execute: ompExecute,
+  testEnvironment: ompTestEnvironment,
+  listSkills: listOmpSkills,
+  syncSkills: syncOmpSkills,
+  sessionCodec: ompSessionCodec,
+  sessionManagement: getAdapterSessionManagement("omp_local") ?? undefined,
+  supportsToolRefreshOnResume: true,
+  models: [],
+  listModels: listOmpModels,
+  supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: true,
+  getRuntimeCommandSpec: (config) =>
+    buildNpmRuntimeCommandSpec(config, "omp", "@oh-my-pi/pi-coding-agent"),
+  agentConfigurationDoc: ompAgentConfigurationDoc,
+};
+
 const piLocalAdapter: ServerAdapterModule = {
   type: "pi_local",
   runtimeToolDelivery: "environment",
@@ -954,6 +984,7 @@ function registerBuiltInAdapters() {
     codexLocalAdapter,
     paperclipRunnerAdapter,
     openCodeLocalAdapter,
+    ompLocalAdapter,
     piLocalAdapter,
     cursorCloudAdapter,
     cursorLocalAdapter,

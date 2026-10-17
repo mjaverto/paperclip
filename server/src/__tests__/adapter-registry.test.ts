@@ -34,7 +34,7 @@ vi.mock("../vendor/paperclip-runner/live/index.js", () => ({
 }));
 
 it("advertises tool-refresh recovery for the selected legacy harness", () => {
-  for (const type of ["claude_local", "codex_local", "grok_local", "gemini_local", "kimi_local", "cursor", "opencode_local", "pi_local"]) {
+  for (const type of ["claude_local", "codex_local", "grok_local", "gemini_local", "kimi_local", "cursor", "omp_local", "opencode_local", "pi_local"]) {
     expect(requireServerAdapter(type).supportsToolRefreshOnResume).toBe(true);
     expect(requireServerAdapter(type).sessionManagement?.supportsSessionResume).toBe(true);
   }

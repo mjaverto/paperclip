@@ -148,7 +148,7 @@ function Setup({
       ? brandType
       : null;
   const multiProvider =
-    brandType === "opencode_local" || brandType === "pi_local";
+    brandType === "omp_local" || brandType === "opencode_local" || brandType === "pi_local";
   const providerKeys = setupProviderKeys(brandType);
   const chooseProvider = multiProvider || brandType === "hermes_local";
   const hasCredentialField =

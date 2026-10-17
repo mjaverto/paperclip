@@ -1064,6 +1064,23 @@ describe("AgentConfigForm environment selector", () => {
     expect(result.container.querySelector('input[aria-label="Variable name"]')).toBeNull();
   });
 
+  it("reads and saves OMP thinking effort using the OMP runtime key", async () => {
+    const result = await renderForm([], { adapterType: "omp_local", adapterConfig: { model: "anthropic/claude-opus-4-6", thinking: "high" } });
+    roots.push(result.root);
+    const effort = [...result.container.querySelectorAll("button")].find(button => button.textContent?.trim() === "high")!;
+    expect(effort).toBeTruthy();
+    await act(async () => effort.click());
+    await flushReact();
+    const low = [...document.querySelectorAll("button")].find(button => button.textContent?.trim() === "lowlow")!;
+    expect(low).toBeTruthy();
+    await act(async () => low.click());
+    await flushReact();
+    const save = [...result.container.querySelectorAll("button")].find(button => button.textContent?.trim() === "Save")!;
+    await act(async () => save.click());
+    expect(result.onSave).toHaveBeenCalledWith(expect.objectContaining({ adapterConfig: expect.objectContaining({ thinking: "low" }) }));
+    expect(result.onSave.mock.calls[0][0].adapterConfig.effort).toBeUndefined();
+  });
+
   it("reads and saves Pi thinking effort using the Pi runtime key", async () => {
     const result = await renderForm([], { adapterType: "pi_local", adapterConfig: { model: "openrouter/anthropic/claude-sonnet-4.6", thinking: "high" } });
     roots.push(result.root);

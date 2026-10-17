@@ -24,6 +24,7 @@ When a heartbeat fires, Paperclip:
 | [Kimi Code CLI](/adapters/kimi-local) | `kimi_local` | Runs Kimi Code CLI locally through ACP, with explicitly selectable headless `-p` mode |
 | OpenCode | `opencode_local` | Runs OpenCode CLI locally (multi-provider `provider/model`) |
 | Cursor | `cursor` | Runs Cursor in background mode |
+| OMP | `omp_local` | Runs an OMP (Oh My Pi) agent locally (`provider/model` selectors) |
 | Pi | `pi_local` | Runs an embedded Pi agent locally |
 | Hermes | `hermes_local` | Runs the local Hermes CLI through `@paperclipai/hermes-paperclip-adapter` |
 | Hermes Gateway | `hermes_gateway` | Calls an already-running Hermes API server through `@paperclipai/hermes-paperclip-adapter/gateway` |
