@@ -33,6 +33,7 @@ const CURATED_MODEL_ORDER_ADAPTERS: ReadonlySet<string> = new Set([
   "kimi_local",
   "openclaw_gateway",
   "opencode_local",
+  "omp_local",
   "pi_local",
 ]);
 
