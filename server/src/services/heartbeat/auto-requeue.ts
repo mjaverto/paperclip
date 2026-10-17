@@ -3,16 +3,23 @@ import { heartbeatRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 
 /**
- * Blanket auto-requeue for failed task-scoped runs. It complements the
- * classified bounded retries in `retries.ts`: when a run fails (or times out)
- * on a specific task and that task has failed fewer than
- * `AUTO_RETRY_MAX_ATTEMPTS` times inside `AUTO_RETRY_WINDOW_MS`, the agent
- * stays `idle` and a fresh wakeup is enqueued instead of parking the agent in
- * `error`. After the third strike the agent goes to `error` as before.
+ * Blanket auto-retry for failed task-scoped runs. It complements the classified
+ * bounded retries in `retries.ts`: when a run fails (or times out) on a specific
+ * task, upstream scheduled no successor for it, and the task has failed fewer
+ * than `AUTO_RETRY_MAX_ATTEMPTS` times inside `AUTO_RETRY_WINDOW_MS`,
+ * `finalizeAgentStatus` asks `scheduleBoundedRetryForRun` for a retry with
+ * reason `auto_retry_after_failure`. Only when that retry is actually scheduled
+ * does the agent stay `idle`; every upstream gate that declines (external runs,
+ * completion-outbox ownership, invalid tool definitions, non-invokable agent,
+ * exhausted budget) leaves the agent in `error` as before. After the third
+ * strike the agent goes to `error` as well.
  */
 export const AUTO_RETRY_MAX_ATTEMPTS = 3;
 export const AUTO_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
-export const AUTO_RETRY_WAKE_REASON = "auto_retry_after_failure";
+export const AUTO_RETRY_REASON = "auto_retry_after_failure";
+export const AUTO_RETRY_WAKE_REASON = AUTO_RETRY_REASON;
+/** Same pause upstream's bounded transient lane uses between attempts. */
+export const AUTO_RETRY_DELAY_MS = 30_000;
 
 const AUTO_RETRY_FAILURE_STATUSES = ["failed", "timed_out"] as const;
 const SYNTHETIC_HEARTBEAT_TASK_KEY = "__heartbeat__";
@@ -28,25 +35,15 @@ export interface AutoRetryCandidate {
 export interface AutoRetrySource {
   runId: string;
   taskKey: string | null;
-  issueId: string | null;
 }
 
-export function autoRetrySourceForRun(run: {
-  id: string;
-  scopeKind?: string | null;
-  issueId?: string | null;
-  contextSnapshot?: unknown;
-}): AutoRetrySource {
+export function autoRetrySourceForRun(run: { id: string; contextSnapshot?: unknown }): AutoRetrySource {
   const context =
     run.contextSnapshot && typeof run.contextSnapshot === "object"
       ? (run.contextSnapshot as Record<string, unknown>)
       : {};
   const taskKey = typeof context.taskKey === "string" && context.taskKey.length > 0 ? context.taskKey : null;
-  return {
-    runId: run.id,
-    taskKey,
-    issueId: run.scopeKind === "issue" ? (run.issueId ?? null) : null,
-  };
+  return { runId: run.id, taskKey };
 }
 
 export interface AutoRetryPolicyQueries {

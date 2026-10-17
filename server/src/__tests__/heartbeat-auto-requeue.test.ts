@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -24,6 +24,7 @@ import { registerServerAdapter, unregisterServerAdapter } from "../adapters/inde
 import { heartbeatService } from "../services/heartbeat.ts";
 import {
   AUTO_RETRY_MAX_ATTEMPTS,
+  AUTO_RETRY_REASON,
   AUTO_RETRY_WAKE_REASON,
   createAutoRetryQueries,
 } from "../services/heartbeat/auto-requeue.js";
@@ -32,6 +33,10 @@ const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const FAILING_ADAPTER = "auto_requeue_failing_test";
 const TRANSIENT_ADAPTER = "auto_requeue_transient_test";
+const INVALID_TOOLS_ADAPTER = "auto_requeue_invalid_tools_test";
+const MANAGER_LOSS_ADAPTER = "auto_requeue_manager_loss_test";
+const UNSAFE_ADAPTER = "auto_requeue_unsafe_test";
+const SAFE_RECOVERY = { kind: "bootstrap", providerWorkStarted: false } as const;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -44,47 +49,47 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
   let heartbeat!: ReturnType<typeof heartbeatService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
+  function failingAdapter(type: string, result: Record<string, unknown>, beforeFailing?: () => Promise<void>) {
+    registerServerAdapter({
+      type,
+      execute: async () => {
+        await beforeFailing?.();
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: "adapter crashed",
+          errorCode: "adapter_failed",
+          // Pre-provider failure evidence: the only kind upstream treats as safe to replay.
+          executionRecovery: SAFE_RECOVERY,
+          resultJson: { executionRecovery: SAFE_RECOVERY },
+          ...result,
+        };
+      },
+      testEnvironment: async () => ({ adapterType: type, status: "pass", checks: [], testedAt: new Date().toISOString() }),
+    });
+  }
+
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-auto-requeue-");
     db = createDb(tempDb.connectionString);
     heartbeat = heartbeatService(db);
-    registerServerAdapter({
-      type: FAILING_ADAPTER,
-      execute: async () => ({
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorMessage: "adapter crashed",
-        errorCode: "adapter_failed",
-      }),
-      testEnvironment: async () => ({
-        adapterType: FAILING_ADAPTER,
-        status: "pass",
-        checks: [],
-        testedAt: new Date().toISOString(),
-      }),
-    });
-    registerServerAdapter({
-      type: TRANSIENT_ADAPTER,
-      execute: async () => ({
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorMessage: "upstream overloaded",
-        errorCode: "overloaded",
-        errorFamily: "transient_upstream",
+    failingAdapter(FAILING_ADAPTER, {});
+    failingAdapter(UNSAFE_ADAPTER, { executionRecovery: undefined, resultJson: undefined });
+    failingAdapter(TRANSIENT_ADAPTER, {
+      errorMessage: "upstream overloaded",
+      errorCode: "overloaded",
+      errorFamily: "transient_upstream",
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      resultJson: {
         executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
-        resultJson: {
-          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
-          errorFamily: "transient_upstream",
-        },
-      }),
-      testEnvironment: async () => ({
-        adapterType: TRANSIENT_ADAPTER,
-        status: "pass",
-        checks: [],
-        testedAt: new Date().toISOString(),
-      }),
+        errorFamily: "transient_upstream",
+      },
+    });
+    failingAdapter(INVALID_TOOLS_ADAPTER, { errorCode: "provider_tool_definition_invalid" });
+    // Loses its manager mid-run, so the agent is no longer invokable when it fails.
+    failingAdapter(MANAGER_LOSS_ADAPTER, {}, async () => {
+      await db.update(agents).set({ status: "terminated" }).where(eq(agents.name, "Manager"));
     });
   }, 20_000);
 
@@ -104,12 +109,13 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
   });
 
   afterAll(async () => {
-    unregisterServerAdapter(FAILING_ADAPTER);
-    unregisterServerAdapter(TRANSIENT_ADAPTER);
+    for (const type of [FAILING_ADAPTER, TRANSIENT_ADAPTER, INVALID_TOOLS_ADAPTER, MANAGER_LOSS_ADAPTER, UNSAFE_ADAPTER]) {
+      unregisterServerAdapter(type);
+    }
     await tempDb?.cleanup();
   });
 
-  async function seedAgent(adapterType = FAILING_ADAPTER) {
+  async function seedAgent(input: { adapterType?: string; adapterConfig?: Record<string, unknown>; withManager?: boolean } = {}) {
     const companyId = randomUUID();
     const agentId = randomUUID();
     await db.insert(companies).values({
@@ -119,14 +125,22 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
     });
+    const managerId = randomUUID();
+    if (input.withManager) {
+      await db.insert(agents).values({
+        id: managerId, companyId, name: "Manager", role: "ceo", status: "idle", adapterType: FAILING_ADAPTER,
+        adapterConfig: {}, runtimeConfig: {}, permissions: {},
+      });
+    }
     await db.insert(agents).values({
       id: agentId,
       companyId,
       name: "Flaky",
       role: "engineer",
       status: "idle",
-      adapterType,
-      adapterConfig: {},
+      reportsTo: input.withManager ? managerId : null,
+      adapterType: input.adapterType ?? FAILING_ADAPTER,
+      adapterConfig: input.adapterConfig ?? {},
       runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
       permissions: {},
     });
@@ -138,93 +152,133 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
     return row?.status;
   }
 
-  async function failedRuns(agentId: string) {
+  async function runsOf(agentId: string) {
     return db
-      .select({ id: heartbeatRuns.id, status: heartbeatRuns.status, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .select({
+        id: heartbeatRuns.id,
+        status: heartbeatRuns.status,
+        retryOfRunId: heartbeatRuns.retryOfRunId,
+        scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
       .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.agentId, agentId))
-      .orderBy(asc(heartbeatRuns.createdAt));
+      .where(eq(heartbeatRuns.agentId, agentId));
   }
 
-  it("requeues a failed task-scoped run until the third strike, then parks the agent in error", async () => {
-    const { agentId } = await seedAgent();
-    await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-A" }, "manual");
+  async function failedCount(agentId: string) {
+    return (await runsOf(agentId)).filter((run) => run.status === "failed").length;
+  }
 
-    await expect
-      .poll(async () => (await failedRuns(agentId)).filter((run) => run.status === "failed").length, {
-        timeout: 20_000,
-        interval: 50,
-      })
-      .toBe(AUTO_RETRY_MAX_ATTEMPTS);
+  /** Make every scheduled retry due and let it execute. */
+  async function promoteScheduledRetries() {
+    await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 60 * 60 * 1000));
+  }
+
+  /** The failed run must finish with the agent parked in `error` and no successor of any kind. */
+  async function expectErrorWithoutRetry(agentId: string, runId: string) {
+    await expect.poll(() => agentStatus(agentId), { timeout: 10_000, interval: 50 }).toBe("error");
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const runs = await runsOf(agentId);
+    expect(runs.map((run) => run.id)).toEqual([runId]);
+    expect(runs.some((run) => run.retryOfRunId !== null)).toBe(false);
+    const wakeups = await db
+      .select({ reason: agentWakeupRequests.reason })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups.some((wake) => wake.reason === AUTO_RETRY_WAKE_REASON)).toBe(false);
+  }
+
+  it("schedules a bounded retry after the first failure and keeps the agent idle", async () => {
+    const { agentId } = await seedAgent();
+    const run = await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-A" }, "manual");
+    await expect.poll(async () => (await runsOf(agentId)).filter((r) => r.status === "scheduled_retry").length, {
+      timeout: 10_000,
+      interval: 50,
+    }).toBe(1);
+    const [retry] = (await runsOf(agentId)).filter((r) => r.status === "scheduled_retry");
+    expect(retry).toMatchObject({ retryOfRunId: run!.id, scheduledRetryReason: AUTO_RETRY_REASON });
+    expect((retry!.contextSnapshot as Record<string, unknown>).taskKey).toBe("task-A");
+    await expect.poll(() => agentStatus(agentId), { timeout: 10_000, interval: 50 }).toBe("idle");
+  }, 30_000);
+
+  it("retries a task until the third strike, then parks the agent in error", async () => {
+    const { agentId } = await seedAgent();
+    await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-B" }, "manual");
+    for (let strike = 1; strike < AUTO_RETRY_MAX_ATTEMPTS; strike += 1) {
+      await expect.poll(() => failedCount(agentId), { timeout: 15_000, interval: 50 }).toBe(strike);
+      await expect
+        .poll(async () => (await runsOf(agentId)).filter((r) => r.status === "scheduled_retry").length, { timeout: 10_000, interval: 50 })
+        .toBe(1);
+      await expect.poll(() => agentStatus(agentId), { timeout: 10_000, interval: 50 }).toBe("idle");
+      await promoteScheduledRetries();
+    }
+    await expect.poll(() => failedCount(agentId), { timeout: 15_000, interval: 50 }).toBe(AUTO_RETRY_MAX_ATTEMPTS);
     await expect.poll(() => agentStatus(agentId), { timeout: 10_000, interval: 50 }).toBe("error");
 
     // No fourth attempt after the strike limit.
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
-    const runs = await failedRuns(agentId);
+    const runs = await runsOf(agentId);
     expect(runs).toHaveLength(AUTO_RETRY_MAX_ATTEMPTS);
-    expect(runs.every((run) => (run.contextSnapshot as Record<string, unknown>).taskKey === "task-A")).toBe(true);
-
-    const wakeups = await db
-      .select({ reason: agentWakeupRequests.reason, source: agentWakeupRequests.source })
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.agentId, agentId));
-    expect(wakeups.filter((wake) => wake.reason === AUTO_RETRY_WAKE_REASON)).toEqual(
-      Array.from({ length: AUTO_RETRY_MAX_ATTEMPTS - 1 }, () => ({ reason: AUTO_RETRY_WAKE_REASON, source: "automation" })),
-    );
-  }, 40_000);
-
-  it("enqueues an automation wakeup after the first failure", async () => {
-    const { agentId } = await seedAgent();
-    await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-B" }, "manual");
-    await expect
-      .poll(
-        () =>
-          db
-            .select({ id: agentWakeupRequests.id })
-            .from(agentWakeupRequests)
-            .where(and(eq(agentWakeupRequests.agentId, agentId), eq(agentWakeupRequests.reason, AUTO_RETRY_WAKE_REASON)))
-            .then((rows) => rows.length),
-        { timeout: 10_000, interval: 25 },
-      )
-      .toBeGreaterThanOrEqual(1);
-  }, 20_000);
+    expect(runs.some((run) => run.status === "scheduled_retry")).toBe(false);
+    expect(runs.every((run) => (run.contextSnapshot as Record<string, unknown>).taskKey === "task-B")).toBe(true);
+    expect(runs.filter((run) => run.scheduledRetryReason === AUTO_RETRY_REASON)).toHaveLength(AUTO_RETRY_MAX_ATTEMPTS - 1);
+  }, 60_000);
 
   it("does not double-retry a run upstream's bounded lane already scheduled", async () => {
-    const { agentId } = await seedAgent(TRANSIENT_ADAPTER);
+    const { agentId } = await seedAgent({ adapterType: TRANSIENT_ADAPTER });
     const run = await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-C" }, "manual");
-    expect(run).not.toBeNull();
-    await expect
-      .poll(
-        () =>
-          db
-            .select({ id: heartbeatRuns.id })
-            .from(heartbeatRuns)
-            .where(eq(heartbeatRuns.retryOfRunId, run!.id))
-            .then((rows) => rows.length),
-        { timeout: 10_000, interval: 50 },
-      )
-      .toBe(1);
-    await expect.poll(() => agentStatus(agentId), { timeout: 10_000, interval: 50 }).toBe("error");
-    const wakeups = await db
-      .select({ reason: agentWakeupRequests.reason })
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.agentId, agentId));
-    expect(wakeups.some((wake) => wake.reason === AUTO_RETRY_WAKE_REASON)).toBe(false);
+    await expect.poll(async () => (await runsOf(agentId)).filter((r) => r.retryOfRunId === run!.id).length, {
+      timeout: 10_000,
+      interval: 50,
+    }).toBe(1);
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const successors = (await runsOf(agentId)).filter((r) => r.retryOfRunId !== null);
+    expect(successors).toHaveLength(1);
+    expect(successors[0]!.scheduledRetryReason).not.toBe(AUTO_RETRY_REASON);
   }, 30_000);
 
-  it("sends unscoped failures straight to error without requeueing", async () => {
+  it("sends unscoped failures straight to error without a retry", async () => {
     const { agentId } = await seedAgent();
-    await heartbeat.invoke(agentId, "on_demand", {}, "manual");
-    await expect.poll(() => agentStatus(agentId), { timeout: 10_000, interval: 50 }).toBe("error");
-    await drainHeartbeatRunsToQuiescence(db, heartbeat);
-    expect(await failedRuns(agentId)).toHaveLength(1);
-    const wakeups = await db
-      .select({ reason: agentWakeupRequests.reason })
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.agentId, agentId));
-    expect(wakeups.some((wake) => wake.reason === AUTO_RETRY_WAKE_REASON)).toBe(false);
+    const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
+    await expectErrorWithoutRetry(agentId, run!.id);
   }, 20_000);
 
+  describe("stays in error when upstream's retry gates decline", () => {
+    it("openai_dot external runs (an external stop cannot be confirmed)", async () => {
+      const { agentId } = await seedAgent({ adapterConfig: { provider: "openai_dot" } });
+      const run = await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-dot" }, "manual");
+      await expectErrorWithoutRetry(agentId, run!.id);
+    }, 20_000);
+
+    it("runs whose provider work may have started (upstream requires reconciliation first)", async () => {
+      const { agentId } = await seedAgent({ adapterType: UNSAFE_ADAPTER });
+      const run = await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-unsafe" }, "manual");
+      await expectErrorWithoutRetry(agentId, run!.id);
+    }, 20_000);
+
+    it("runs whose retry budget the completion outbox owns", async () => {
+      const { agentId } = await seedAgent();
+      const run = await heartbeat.invoke(
+        agentId,
+        "on_demand",
+        { taskKey: "task-outbox", chatCompletionDeliveryIds: [randomUUID()] },
+        "manual",
+      );
+      await expectErrorWithoutRetry(agentId, run!.id);
+    }, 20_000);
+
+    it("provider_tool_definition_invalid failures", async () => {
+      const { agentId } = await seedAgent({ adapterType: INVALID_TOOLS_ADAPTER });
+      const run = await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-tools" }, "manual");
+      await expectErrorWithoutRetry(agentId, run!.id);
+    }, 20_000);
+
+    it("agents that are no longer invokable", async () => {
+      const { agentId } = await seedAgent({ adapterType: MANAGER_LOSS_ADAPTER, withManager: true });
+      const run = await heartbeat.invoke(agentId, "on_demand", { taskKey: "task-orphan" }, "manual");
+      await expectErrorWithoutRetry(agentId, run!.id);
+    }, 20_000);
+  });
   describe("queries", () => {
     it("counts only this agent's failed or timed-out runs for the task inside the window", async () => {
       const { companyId, agentId } = await seedAgent();

@@ -61,14 +61,12 @@ describe("auto-requeue no-double-retry guard", () => {
 });
 
 describe("autoRetrySourceForRun", () => {
-  it("reads the task key from the run context and the issue from the durable scope", () => {
-    expect(autoRetrySourceForRun({ id: "r", scopeKind: "issue", issueId: "i-1", contextSnapshot: { taskKey: "t-1" } }))
-      .toEqual({ runId: "r", taskKey: "t-1", issueId: "i-1" });
+  it("reads the task key from the run context", () => {
+    expect(autoRetrySourceForRun({ id: "r", contextSnapshot: { taskKey: "t-1" } })).toEqual({ runId: "r", taskKey: "t-1" });
   });
 
-  it("does not promote an unscoped run's context into an issue binding", () => {
-    expect(autoRetrySourceForRun({ id: "r", scopeKind: "company", issueId: null, contextSnapshot: { taskKey: "t-1", issueId: "i-9" } }))
-      .toEqual({ runId: "r", taskKey: "t-1", issueId: null });
-    expect(autoRetrySourceForRun({ id: "r", contextSnapshot: null })).toEqual({ runId: "r", taskKey: null, issueId: null });
+  it("yields no task key for runs without a scoped context", () => {
+    expect(autoRetrySourceForRun({ id: "r", contextSnapshot: { issueId: "i-9" } })).toEqual({ runId: "r", taskKey: null });
+    expect(autoRetrySourceForRun({ id: "r", contextSnapshot: null })).toEqual({ runId: "r", taskKey: null });
   });
 });

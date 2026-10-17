@@ -81,6 +81,9 @@ export {
   computeBoundedTransientHeartbeatRetrySchedule,
 } from "./heartbeat/retries.js";
 import {
+  AUTO_RETRY_DELAY_MS,
+  AUTO_RETRY_MAX_ATTEMPTS,
+  AUTO_RETRY_REASON,
   AUTO_RETRY_WAKE_REASON,
   createAutoRetryPolicy,
   createAutoRetryQueries,
@@ -1569,7 +1572,7 @@ export function heartbeatService(
       /** The failed run, when it is eligible for the blanket auto-requeue lane. */
       autoRetry?: AutoRetrySource;
     },
-  ) {
+  ): Promise<void> {
     const existing = await getAgent(agentId);
     if (!existing) return;
 
@@ -1581,19 +1584,46 @@ export function heartbeatService(
       options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt;
 
     const runningCount = await countRunningRunsForAgent(agentId);
-    // keepIdleOnFailure marks failures a blind retry cannot fix (quota,
-    // workspace conflicts), so those never auto-requeue.
-    const willAutoRetry =
+    // Auto-requeue goes through upstream's bounded retry scheduler so its gates
+    // (external runs, completion-outbox ownership, invalid tool definitions,
+    // invokability, retry budget) apply. The agent stays idle only when a retry
+    // was actually scheduled. keepIdleOnFailure marks failures a blind retry
+    // cannot fix (quota, workspace conflicts), so those never auto-requeue.
+    let willAutoRetry = false;
+    const autoRetrySource = options?.autoRetry;
+    if (
+      autoRetrySource &&
       runningCount === 0 &&
       (outcome === "failed" || outcome === "timed_out") &&
       !options?.keepIdleOnFailure &&
-      options?.autoRetry !== undefined &&
       (await autoRetryPolicy.shouldAutoRetry({
-        runId: options.autoRetry.runId,
+        runId: autoRetrySource.runId,
         companyId: existing.companyId,
         agentId,
-        taskKey: options.autoRetry.taskKey,
-      }));
+        taskKey: autoRetrySource.taskKey,
+      }))
+    ) {
+      const scheduled = await scheduleBoundedRetry(autoRetrySource.runId, {
+        retryReason: AUTO_RETRY_REASON,
+        wakeReason: AUTO_RETRY_WAKE_REASON,
+        maxAttempts: AUTO_RETRY_MAX_ATTEMPTS - 1,
+        delayMs: AUTO_RETRY_DELAY_MS,
+      }).catch((err) => {
+        logger.warn({ err, agentId, runId: autoRetrySource.runId }, "auto-retry scheduling failed");
+        return null;
+      });
+      willAutoRetry = scheduled?.outcome === "scheduled";
+      logger.info(
+        {
+          agentId,
+          runId: autoRetrySource.runId,
+          taskKey: autoRetrySource.taskKey,
+          retryOutcome: scheduled?.outcome ?? "error",
+          reason: scheduled && "reason" in scheduled ? scheduled.reason : undefined,
+        },
+        willAutoRetry ? "auto-retry scheduled after failure" : "auto-retry not scheduled",
+      );
+    }
     const nextStatus =
       runningCount > 0
         ? "running"
@@ -1645,25 +1675,6 @@ export function heartbeatService(
           outcome,
         },
       });
-    }
-
-    if (updated && willAutoRetry && options?.autoRetry) {
-      const { taskKey, issueId } = options.autoRetry;
-      logger.info({ agentId, taskKey }, "auto-retrying agent after failure");
-      const wakeup = await enqueueWakeup(agentId, {
-        source: "automation",
-        reason: AUTO_RETRY_WAKE_REASON,
-        triggerDetail: "system",
-        payload: { taskKey, ...(issueId ? { issueId } : {}) },
-      }).catch((err) => {
-        logger.warn({ err, agentId, taskKey }, "auto-retry wakeup enqueue failed");
-        return undefined;
-      });
-      // enqueueWakeup resolves null (it does not throw) when policy skips the
-      // wake, e.g. wakeOnDemand disabled; surface the silent drop.
-      if (wakeup === null) {
-        logger.warn({ agentId, taskKey }, "auto-retry wakeup skipped by wakeup policy");
-      }
     }
   }
 
