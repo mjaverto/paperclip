@@ -173,9 +173,15 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
     return (await runsOf(agentId)).filter((run) => run.status === "failed").length;
   }
 
-  /** Make every scheduled retry due and let it execute. */
+  /**
+   * Make every scheduled retry due and drive it, exactly as the scheduler tick does
+   * (server index.ts): promotion only moves a run to `queued`; `resumeQueuedRuns` is
+   * what starts it. Promoting alone leaves the run queued whenever the previous
+   * run's own tail has already finished its queue sweep.
+   */
   async function promoteScheduledRetries() {
     await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 60 * 60 * 1000));
+    await heartbeat.resumeQueuedRuns();
   }
 
   /** The failed run must finish with the agent parked in `error` and no successor of any kind. */
