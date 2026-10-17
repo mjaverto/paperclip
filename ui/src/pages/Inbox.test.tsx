@@ -87,7 +87,7 @@ vi.mock("../api/agents", () => ({
 
 vi.mock("../api/heartbeats", () => ({
   heartbeatsApi: {
-    list: apiMocks.heartbeatRunsList,
+    latestFailed: apiMocks.heartbeatRunsList,
     liveRunsForCompany: apiMocks.liveRunsForCompany,
   },
 }));

@@ -113,6 +113,14 @@ export type RuntimeRequestResolution =
 
 export interface HeartbeatRunListOptions {
   summary?: boolean;
+  offset?: number;
+}
+
+/** One (UTC day, status) bucket from the grouped run-stats endpoint. */
+export interface HeartbeatRunStats {
+  date: string;
+  status: string;
+  count: number;
 }
 
 export interface ProviderTraceInspection {
@@ -132,11 +140,18 @@ export const heartbeatsApi = {
     if (agentId) searchParams.set("agentId", agentId);
     if (limit) searchParams.set("limit", String(limit));
     if (options.summary) searchParams.set("summary", "true");
+    if (options.offset) searchParams.set("offset", String(options.offset));
     const qs = searchParams.toString();
     return api.get<HeartbeatRun[]>(
       `/companies/${companyId}/heartbeat-runs${qs ? `?${qs}` : ""}`,
     );
   },
+  stats: (companyId: string, agentId?: string) => {
+    const qs = agentId ? `?agentId=${encodeURIComponent(agentId)}` : "";
+    return api.get<HeartbeatRunStats[]>(`/companies/${companyId}/heartbeat-runs/stats${qs}`);
+  },
+  latestFailed: (companyId: string) =>
+    api.get<HeartbeatRun[]>(`/companies/${companyId}/heartbeat-runs/latest-failed`),
   get: (runId: string) => api.get<HeartbeatRun>(`/heartbeat-runs/${runId}`),
   events: (runId: string, afterSeq = 0, limit = 200, options?: RequestOptions) =>
     api.get<HeartbeatRunEvent[]>(

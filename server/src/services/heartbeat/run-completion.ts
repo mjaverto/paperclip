@@ -30,6 +30,7 @@ import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-n
 import { MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
+import { autoRetrySourceForRun } from "./auto-requeue.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { createHeartbeatRetries, HeartbeatRetryDependencies } from "./retries.js";
 import type { createHeartbeatQueue } from "./queue.js";
@@ -1029,6 +1030,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           : runErrorCode === "provider_quota") ||
           isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
       wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+      autoRetry: autoRetrySourceForRun(run),
     });
   }
 
@@ -1255,6 +1257,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
     await finalizeAgentStatus(agent.id, "failed", message, {
       wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+      // Workspace/configuration failures are deterministic: no agent attempt ran, so a blind retry cannot help.
+      autoRetry:
+        workspaceValidationFailure || configurationIncompleteFailure
+          ? undefined
+          : autoRetrySourceForRun(run),
       keepIdleOnFailure:
         Boolean(nonRetryablePreflightFailureCode(err)) ||
         isWorkspaceSyncConflictFailure(message),

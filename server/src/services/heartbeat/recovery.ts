@@ -36,6 +36,7 @@ import {
   nativeRunFinalizations,
 } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
+import { autoRetrySourceForRun } from "./auto-requeue.js";
 import {
   claimNativeRestartRecoveries,
   closeIdleWarmNativeSessionsForRestart,
@@ -2445,6 +2446,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
 
       await finalizeAgentStatus(run.agentId, "failed", baseMessage, {
         wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+        autoRetry: autoRetrySourceForRun(run),
       });
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);

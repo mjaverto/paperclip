@@ -9,6 +9,7 @@ import {
   eq,
   getTableColumns,
   gt,
+  inArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -1678,7 +1679,7 @@ export function createHeartbeatRunState(db: Db) {
       companyId: string,
       agentId?: string,
       limit?: number,
-      options: { summary?: boolean } = {},
+      options: { summary?: boolean; offset?: number; runIds?: string[] } = {},
     ) => {
       const safeForLegacyEncoding = await hasUnsafeTextProjectionDatabase();
       const summary = options.summary === true;
@@ -1705,19 +1706,20 @@ export function createHeartbeatRunState(db: Db) {
           .from(heartbeatRuns)
           .leftJoin(heartbeatRunListContextRecord, sql`true`)
           .where(
-            agentId
-              ? and(
-                  eq(heartbeatRuns.companyId, companyId),
-                  eq(heartbeatRuns.agentId, agentId),
-                )
-              : eq(heartbeatRuns.companyId, companyId),
+            and(
+              eq(heartbeatRuns.companyId, companyId),
+              agentId ? eq(heartbeatRuns.agentId, agentId) : undefined,
+              options.runIds ? inArray(heartbeatRuns.id, options.runIds) : undefined,
+            ),
           )
-          .orderBy(desc(heartbeatRuns.createdAt));
+          // The id tiebreaker keeps offset pages stable when runs share a createdAt.
+          .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
 
         const boundedLimit = Number.isFinite(limit)
           ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, Math.trunc(limit!)))
           : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
-        return await query.limit(boundedLimit);
+        const boundedOffset = Number.isFinite(options.offset) ? Math.max(0, Math.trunc(options.offset!)) : 0;
+        return await query.limit(boundedLimit).offset(boundedOffset);
       });
       return rows.map((row) => {
         const {

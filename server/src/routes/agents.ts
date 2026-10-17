@@ -6666,6 +6666,25 @@ export function agentRoutes(
     }
   });
 
+  router.get("/companies/:companyId/heartbeat-runs/stats", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertRunTelemetryReadAllowed(req, res, companyId))) return;
+    const agentId = req.query.agentId as string | undefined;
+    res.json(await heartbeat.stats(companyId, agentId));
+  });
+
+  router.get("/companies/:companyId/heartbeat-runs/latest-failed", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertRunTelemetryReadAllowed(req, res, companyId))) return;
+    const runs = await heartbeat.latestFailed(companyId);
+    const readDecisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);
+    res.json(await runRedactions.redactForRuns(companyId, runs.map((run, index) =>
+      readDecisions[index] ? run : redactHeartbeatRunListRow(run)),
+      req.actor.type === "board" ? getActorInfo(req).actorId : null));
+  });
+
   router.get("/companies/:companyId/heartbeat-runs", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -6675,8 +6694,9 @@ export function agentRoutes(
     const limit = limitParam
       ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, parseInt(limitParam, 10) || HEARTBEAT_RUN_LIST_DEFAULT_LIMIT))
       : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
+    const offset = Math.max(0, parseInt(req.query.offset as string, 10) || 0);
     const summary = req.query.summary === "true" || req.query.summary === "1";
-    const runs = await heartbeat.list(companyId, agentId, limit, { summary });
+    const runs = await heartbeat.list(companyId, agentId, limit, { summary, offset });
     const readDecisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);
     res.json(await runRedactions.redactForRuns(companyId, runs.map((run, index) =>
       readDecisions[index] ? run : redactHeartbeatRunListRow(run)),

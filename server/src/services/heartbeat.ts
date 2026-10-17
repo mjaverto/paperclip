@@ -81,6 +81,12 @@ export {
   computeBoundedTransientHeartbeatRetrySchedule,
 } from "./heartbeat/retries.js";
 import {
+  AUTO_RETRY_WAKE_REASON,
+  createAutoRetryPolicy,
+  createAutoRetryQueries,
+  type AutoRetrySource,
+} from "./heartbeat/auto-requeue.js";
+import {
   EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON,
   deriveTaskKeyWithHeartbeatFallback,
   getAdapterSessionCodec,
@@ -298,6 +304,7 @@ import {
   and,
   eq,
   exists,
+  gte,
   inArray,
   isNull,
   notInArray,
@@ -1550,11 +1557,18 @@ export function heartbeatService(
     return trimmed.length > 500 ? `${trimmed.slice(0, 499)}…` : trimmed;
   }
 
+  const autoRetryPolicy = createAutoRetryPolicy(createAutoRetryQueries(db));
+
   async function finalizeAgentStatus(
     agentId: string,
     outcome: "succeeded" | "interrupted" | "failed" | "cancelled" | "timed_out",
     failureReason?: string | null,
-    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
+    options?: {
+      keepIdleOnFailure?: boolean;
+      wasFirstHeartbeat?: boolean;
+      /** The failed run, when it is eligible for the blanket auto-requeue lane. */
+      autoRetry?: AutoRetrySource;
+    },
   ) {
     const existing = await getAgent(agentId);
     if (!existing) return;
@@ -1567,13 +1581,27 @@ export function heartbeatService(
       options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt;
 
     const runningCount = await countRunningRunsForAgent(agentId);
+    // keepIdleOnFailure marks failures a blind retry cannot fix (quota,
+    // workspace conflicts), so those never auto-requeue.
+    const willAutoRetry =
+      runningCount === 0 &&
+      (outcome === "failed" || outcome === "timed_out") &&
+      !options?.keepIdleOnFailure &&
+      options?.autoRetry !== undefined &&
+      (await autoRetryPolicy.shouldAutoRetry({
+        runId: options.autoRetry.runId,
+        companyId: existing.companyId,
+        agentId,
+        taskKey: options.autoRetry.taskKey,
+      }));
     const nextStatus =
       runningCount > 0
         ? "running"
         : outcome === "succeeded" ||
             outcome === "interrupted" ||
             outcome === "cancelled" ||
-            (outcome === "failed" && options?.keepIdleOnFailure)
+            (outcome === "failed" && options?.keepIdleOnFailure) ||
+            willAutoRetry
           ? "idle"
           : "error";
 
@@ -1617,6 +1645,25 @@ export function heartbeatService(
           outcome,
         },
       });
+    }
+
+    if (updated && willAutoRetry && options?.autoRetry) {
+      const { taskKey, issueId } = options.autoRetry;
+      logger.info({ agentId, taskKey }, "auto-retrying agent after failure");
+      const wakeup = await enqueueWakeup(agentId, {
+        source: "automation",
+        reason: AUTO_RETRY_WAKE_REASON,
+        triggerDetail: "system",
+        payload: { taskKey, ...(issueId ? { issueId } : {}) },
+      }).catch((err) => {
+        logger.warn({ err, agentId, taskKey }, "auto-retry wakeup enqueue failed");
+        return undefined;
+      });
+      // enqueueWakeup resolves null (it does not throw) when policy skips the
+      // wake, e.g. wakeOnDemand disabled; surface the silent drop.
+      if (wakeup === null) {
+        logger.warn({ agentId, taskKey }, "auto-retry wakeup skipped by wakeup policy");
+      }
     }
   }
 
@@ -3982,6 +4029,44 @@ export function heartbeatService(
       }
     },
     list: listRuns,
+    /**
+     * Per-day, per-status run counts for the trailing 14 UTC days. Grouped in
+     * Postgres so charts never download run rows.
+     */
+    stats: async (companyId: string, agentId?: string) => {
+      const windowStart = new Date();
+      windowStart.setUTCHours(0, 0, 0, 0);
+      windowStart.setUTCDate(windowStart.getUTCDate() - 13);
+      const day = sql<string>`to_char(${heartbeatRuns.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
+      const rows = await db
+        .select({ date: day, status: heartbeatRuns.status, count: sql<number>`count(*)::int` })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, companyId),
+            agentId ? eq(heartbeatRuns.agentId, agentId) : undefined,
+            gte(heartbeatRuns.createdAt, windowStart),
+          ),
+        )
+        .groupBy(day, heartbeatRuns.status)
+        .orderBy(day);
+      return rows;
+    },
+
+    /** The newest run of each agent in the company, kept only when it failed or timed out. */
+    latestFailed: async (companyId: string) => {
+      const latest = await db.execute<{ id: string; status: string }>(sql`
+        select distinct on (agent_id) id, status
+        from heartbeat_runs
+        where company_id = ${companyId}
+        order by agent_id, created_at desc, id desc
+      `);
+      const failedRunIds = latest
+        .filter((row) => row.status === "failed" || row.status === "timed_out")
+        .map((row) => row.id);
+      if (failedRunIds.length === 0) return [];
+      return listRuns(companyId, undefined, failedRunIds.length, { runIds: failedRunIds });
+    },
 
     getRun,
 

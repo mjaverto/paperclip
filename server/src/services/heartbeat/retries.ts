@@ -59,6 +59,7 @@ import {
 
 import type { AppendHeartbeatRunEventInput } from "../heartbeat-run-events.js";
 import type { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
+import type { AutoRetrySource } from "./auto-requeue.js";
 import type { createHeartbeatRunState } from "./run-state.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { createRunDispatch, PostCommitEffect } from "../../modules/run-dispatch/index.js";
@@ -105,7 +106,7 @@ export interface HeartbeatRetryDependencies {
     agentId: string,
     outcome: "succeeded" | "interrupted" | "failed" | "cancelled" | "timed_out",
     failureReason?: string | null,
-    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
+    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean; autoRetry?: AutoRetrySource },
   ) => Promise<void>;
   getWorktreeExecutionCutoff: () => Promise<Date | null>;
   applyRunDispatchPostCommitEffects: (effects: PostCommitEffect[]) => void;

@@ -12,7 +12,7 @@ import { mergeRunLogChunks, readChunkSeq } from "../lib/run-log-chunks";
 import { getPageVisibility, usePageVisibility } from "../lib/page-visibility";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate, Link, Navigate, useBeforeUnload, type NavigateFunction } from "@/lib/router";
-import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   agentsApi,
   type AgentKey,
@@ -21,7 +21,9 @@ import {
 } from "../api/agents";
 import { builtInAgentsApi, type BuiltInManagedResourceKind } from "../api/builtInAgents";
 import { companySkillsApi } from "../api/companySkills";
-import { heartbeatsApi } from "../api/heartbeats";
+import { heartbeatsApi, type HeartbeatRunStats } from "../api/heartbeats";
+import { runStatsToActivity } from "../lib/run-stats";
+import { RunActivityChart } from "../components/ActivityCharts";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { ApiError } from "../api/client";
 import { activityApi } from "../api/activity";
@@ -161,6 +163,8 @@ const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string 
 };
 
 const RUN_LOG_PAGE_BYTES = 256_000;
+/** Runs fetched per page for the agent run list and its "Load older runs" control. */
+const AGENT_RUNS_PAGE_SIZE = 50;
 
 const REDACTED_ENV_VALUE = "***REDACTED***";
 const SECRET_ENV_KEY_RE =
@@ -923,10 +927,35 @@ export function AgentDetail() {
     enabled: Boolean(resolvedAgentId) && needsOverviewData,
   });
 
-  const { data: heartbeats } = useQuery({
-    queryKey: queryKeys.heartbeats(resolvedCompanyId!, agent?.id ?? undefined),
-    queryFn: () => heartbeatsApi.list(resolvedCompanyId!, agent?.id ?? undefined),
+  const {
+    data: heartbeatPages,
+    hasNextPage: hasMoreHeartbeats,
+    fetchNextPage: fetchMoreHeartbeats,
+    isFetchingNextPage: isFetchingMoreHeartbeats,
+  } = useInfiniteQuery({
+    // Distinct from the flat keys other screens cache under queryKeys.heartbeats; invalidating
+    // that prefix still refreshes every loaded page.
+    queryKey: [...queryKeys.heartbeats(resolvedCompanyId!, agent?.id ?? undefined), "paged"],
+    queryFn: ({ pageParam }) =>
+      heartbeatsApi.list(resolvedCompanyId!, agent?.id ?? undefined, AGENT_RUNS_PAGE_SIZE, { offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length < AGENT_RUNS_PAGE_SIZE ? undefined : allPages.length * AGENT_RUNS_PAGE_SIZE,
     enabled: !!resolvedCompanyId && !!agent?.id && shouldLoadHeartbeats,
+  });
+  const heartbeats = useMemo(() => {
+    const seen = new Set<string>();
+    return (heartbeatPages?.pages ?? []).flat().filter((run) => {
+      // Offset pages can overlap when new runs land between fetches.
+      if (seen.has(run.id)) return false;
+      seen.add(run.id);
+      return true;
+    });
+  }, [heartbeatPages]);
+  const { data: runStats } = useQuery({
+    queryKey: [...queryKeys.heartbeats(resolvedCompanyId!, agent?.id ?? undefined), "stats"],
+    queryFn: () => heartbeatsApi.stats(resolvedCompanyId!, agent?.id ?? undefined),
+    enabled: !!resolvedCompanyId && !!agent?.id && needsOverviewData,
   });
 
   const { data: allIssues } = useQuery({
@@ -1402,6 +1431,7 @@ export function AgentDetail() {
         <AgentOverview
           agent={agent}
           runs={heartbeats ?? []}
+          runStats={runStats}
           assignedIssues={assignedIssues}
           runtimeState={runtimeState}
           reportsToAgent={reportsToAgent}
@@ -1507,6 +1537,9 @@ export function AgentDetail() {
           selectedRunId={urlRunId ?? null}
           adapterType={agent.adapterType}
           adapterConfig={agent.adapterConfig}
+          hasMore={hasMoreHeartbeats}
+          loadingMore={isFetchingMoreHeartbeats}
+          onLoadMore={() => { void fetchMoreHeartbeats(); }}
         />
       )}
 
@@ -1717,6 +1750,7 @@ function LatestRunCard({
 export function AgentOverview({
   agent,
   runs,
+  runStats,
   assignedIssues,
   runtimeState,
   reportsToAgent,
@@ -1726,6 +1760,7 @@ export function AgentOverview({
 }: {
   agent: AgentDetailRecord;
   runs: HeartbeatRun[];
+  runStats?: HeartbeatRunStats[];
   assignedIssues: Issue[];
   runtimeState?: AgentRuntimeState;
   reportsToAgent?: Agent;
@@ -1733,6 +1768,7 @@ export function AgentOverview({
   skillNames: string[];
   agentRouteId: string;
 }) {
+  const runActivity = useMemo(() => runStatsToActivity(runStats ?? []), [runStats]);
   const issuesById = useMemo(() => {
     const map = new Map<string, (typeof assignedIssues)[number]>();
     for (const issue of assignedIssues) map.set(issue.id, issue);
@@ -1758,6 +1794,11 @@ export function AgentOverview({
   return (
     <div className="space-y-6">
       <LatestRunCard runs={runs} agentId={agentRouteId} issuesById={issuesById} />
+
+      <section className="rounded-lg border border-border p-4" aria-labelledby="agent-run-activity-heading">
+        <h3 id="agent-run-activity-heading" className="mb-3 text-sm font-medium">Run activity (14 days)</h3>
+        <RunActivityChart activity={runActivity} />
+      </section>
 
       <div className="grid gap-4 md:grid-cols-2">
         <section className="rounded-lg border border-border p-4" aria-labelledby="agent-identity-heading">
@@ -3324,6 +3365,9 @@ export function RunsTab({
   selectedRunId,
   adapterType,
   adapterConfig,
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore,
 }: {
   runs: HeartbeatRun[];
   companyId: string;
@@ -3332,6 +3376,9 @@ export function RunsTab({
   selectedRunId: string | null;
   adapterType: string;
   adapterConfig: Record<string, unknown>;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
 }) {
   const { isMobile } = useSidebar();
 
@@ -3339,6 +3386,13 @@ export function RunsTab({
   const sorted = [...runs].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
+  const loadMore = hasMore ? (
+    <div className="p-2">
+      <Button variant="outline" size="sm" className="w-full" disabled={loadingMore} onClick={onLoadMore}>
+        {loadingMore ? "Loading…" : "Load older runs"}
+      </Button>
+    </div>
+  ) : null;
 
   // On mobile, don't auto-select so the list shows first; on desktop, auto-select latest
   const effectiveRunId = isMobile ? selectedRunId : (selectedRunId ?? sorted[0]?.id ?? null);
@@ -3374,6 +3428,7 @@ export function RunsTab({
         {sorted.map((run) => (
           <RunListItem key={run.id} run={run} isSelected={false} agentId={agentRouteId} />
         ))}
+        {loadMore}
       </div>
     );
   }
@@ -3390,6 +3445,7 @@ export function RunsTab({
         {sorted.map((run) => (
           <RunListItem key={run.id} run={run} isSelected={run.id === effectiveRunId} agentId={agentRouteId} />
         ))}
+        {loadMore}
         </div>
       </div>
 

@@ -7372,9 +7372,31 @@ registry.registerPath({
       agentId: z.string().optional(),
       limit: z.coerce.number().int().min(1).max(1000).default(200),
       summary: z.enum(["true", "false", "1", "0"]).optional(),
+      offset: z.coerce.number().int().min(0).default(0),
     }),
   },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/heartbeat-runs/stats",
+  tags: ["runs"],
+  summary: "Count heartbeat runs per UTC day and status over the trailing 14 days",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    query: z.object({ agentId: z.string().optional() }),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/heartbeat-runs/latest-failed",
+  tags: ["runs"],
+  summary: "List each agent's newest heartbeat run when it failed or timed out",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
