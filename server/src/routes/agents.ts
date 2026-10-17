@@ -340,6 +340,25 @@ function readLiveRunsQueryInt(value: unknown, max: number, fallback = 0) {
   return Math.min(max, Math.trunc(parsed));
 }
 
+const HEARTBEAT_RUN_LIST_MAX_OFFSET = 100_000;
+
+/** Optional `agentId` query value; anything that is not a UUID is a 400, never a silent empty list. */
+function readRunListAgentId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !isUuidLike(value)) throw badRequest("agentId must be a UUID");
+  return value.trim();
+}
+
+/** Optional `offset` query value: a non-negative integer no larger than the paging ceiling. */
+function readRunListOffset(value: unknown): number {
+  if (value === undefined) return 0;
+  const parsed = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed > HEARTBEAT_RUN_LIST_MAX_OFFSET) {
+    throw badRequest(`offset must be an integer between 0 and ${HEARTBEAT_RUN_LIST_MAX_OFFSET}`);
+  }
+  return parsed;
+}
+
 function readRunIssueId(context: Record<string, unknown> | null) {
   const directIssueId = context?.issueId;
   if (typeof directIssueId === "string" && isUuidLike(directIssueId)) return directIssueId;
@@ -6670,7 +6689,7 @@ export function agentRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (!(await assertRunTelemetryReadAllowed(req, res, companyId))) return;
-    const agentId = req.query.agentId as string | undefined;
+    const agentId = readRunListAgentId(req.query.agentId);
     res.json(await heartbeat.stats(companyId, agentId));
   });
 
@@ -6689,12 +6708,12 @@ export function agentRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (!(await assertRunTelemetryReadAllowed(req, res, companyId))) return;
-    const agentId = req.query.agentId as string | undefined;
+    const agentId = readRunListAgentId(req.query.agentId);
     const limitParam = req.query.limit as string | undefined;
     const limit = limitParam
       ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, parseInt(limitParam, 10) || HEARTBEAT_RUN_LIST_DEFAULT_LIMIT))
       : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
-    const offset = Math.max(0, parseInt(req.query.offset as string, 10) || 0);
+    const offset = readRunListOffset(req.query.offset);
     const summary = req.query.summary === "true" || req.query.summary === "1";
     const runs = await heartbeat.list(companyId, agentId, limit, { summary, offset });
     const readDecisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);

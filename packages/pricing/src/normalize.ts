@@ -73,6 +73,8 @@ export interface ModelsDevRecord {
     cache_read?: number;
     cache_write?: number;
     reasoning?: number;
+    /** Long-context (>200k prompt tokens) rates models.dev publishes per request. */
+    context_over_200k?: { input?: number; output?: number };
   };
   reasoning?: boolean;
 }
@@ -89,15 +91,25 @@ export function entryFromModelsDev(record: ModelsDevRecord): CatalogEntry | null
   }
   const entry: CatalogEntry = {
     input_per_mtok: cost.input,
-    cached_input_per_mtok: typeof cost.cache_read === 'number' ? cost.cache_read : cost.input,
     output_per_mtok: cost.output,
     source: 'models.dev',
   };
+  // Leave the cached rate unset when models.dev omits it, so a merge keeps the
+  // LiteLLM rate; `priceUsd` falls back to the input rate when nobody has one.
+  if (typeof cost.cache_read === 'number') {
+    entry.cached_input_per_mtok = cost.cache_read;
+  }
   if (typeof cost.cache_write === 'number') {
     entry.cache_write_per_mtok = cost.cache_write;
   }
   if (typeof cost.reasoning === 'number') {
     entry.reasoning_per_mtok = cost.reasoning;
+  }
+  const over200k = cost.context_over_200k;
+  if (over200k && typeof over200k.input === 'number' && typeof over200k.output === 'number') {
+    entry.tier_threshold_tokens = 200_000;
+    entry.over_threshold_input_per_mtok = over200k.input;
+    entry.over_threshold_output_per_mtok = over200k.output;
   }
   return entry;
 }
@@ -113,11 +125,12 @@ export function entryFromLiteLLM(record: LiteLLMRecord): CatalogEntry | null {
 
   const entry: CatalogEntry = {
     input_per_mtok: toMtok(inputPerToken),
-    cached_input_per_mtok:
-      cacheReadPerToken !== null ? toMtok(cacheReadPerToken) : toMtok(inputPerToken),
     output_per_mtok: toMtok(outputPerToken),
     source: 'litellm',
   };
+  if (cacheReadPerToken !== null) {
+    entry.cached_input_per_mtok = toMtok(cacheReadPerToken);
+  }
   if (cacheWritePerToken !== null) {
     entry.cache_write_per_mtok = toMtok(cacheWritePerToken);
   }

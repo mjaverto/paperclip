@@ -14,7 +14,7 @@ The pricing service is a fallback estimator that converts `(provider, model, usa
   - `src/aliases.ts` — Bedrock region map and other static alias rules.
   - `src/refresh.ts` — script that rebuilds `data/catalog.json`.
   - `data/catalog.json` — vendored snapshot, committed to the repo.
-- Server consumer: `server/src/services/catalog-pricing.ts` (`priceCatalogReceipt`), chained after `priceCodexReceipt` / `priceAnthropicReceipt` in `server/src/services/usage-receipts.ts`. It applies only to complete, per-run receipts with token counts, no cost, an explicit USD-denominated billing type, and a provider other than `anthropic` / `openai`. A hit sets `costStatus: "estimated"` and `pricingProvenance: { source: "rate_card", version: "pricing-catalog/v1", ... }`; cache writes are billed at the input rate.
+- Server consumer: `server/src/services/catalog-pricing.ts` (`priceCatalogReceipt`), chained after `priceCodexReceipt` / `priceAnthropicReceipt` in `server/src/services/usage-receipts.ts`. It applies only to complete, per-run receipts with token counts, no cost, an explicit USD-denominated billing type, and a provider other than `anthropic` / `openai`. A hit sets `costStatus: "estimated"` and `pricingProvenance: { source: "rate_card", version: "pricing-catalog/<12-char sha256 of the catalog>", ... }` so every estimate pins the exact snapshot it used; cache writes are billed at the input rate.
 
 Runtime never makes a network call. All lookups read the vendored snapshot.
 
@@ -28,15 +28,15 @@ Each entry in `data/catalog.json` is keyed by the normalized `${provider}/${mode
 type CatalogEntry = {
   // Required pricing rates, in USD per million tokens.
   input_per_mtok: number;
-  cached_input_per_mtok: number;
+  cached_input_per_mtok?: number;  // falls back to input_per_mtok when absent
   output_per_mtok: number;
 
   // Optional rates. Omitted when the provider does not charge separately.
   cache_write_per_mtok?: number;   // Anthropic-style cache writes
   reasoning_per_mtok?: number;     // Claude extended thinking, o1-style reasoning
 
-  // Optional long-context tier. When usage exceeds tier_threshold_tokens,
-  // input/output bill at the over_threshold_* rates instead.
+  // Optional per-request long-context tier. A request above tier_threshold_tokens
+  // bills at the over_threshold_* rates (see "Long-context tiers are per request").
   tier_threshold_tokens?: number;
   over_threshold_input_per_mtok?: number;
   over_threshold_output_per_mtok?: number;
@@ -101,7 +101,7 @@ This fetches both sources, normalizes them, writes `packages/pricing/data/catalo
 1. **Normalize** the key. `normalize.ts` strips redundant provider prefixes, lowercases, resolves aliases, handles Bedrock regional IDs, and tolerates `model = null` (acpx-local). The lookup key is `${provider}/${model}` after normalization.
 2. **Check the `billingType` allowlist.** Only `["metered_api", "credits", "unknown"]` are eligible. Anything else returns `null` immediately without a catalog read. See "billingType eligibility" below.
 3. **Look up the catalog entry.** Miss → return `null`.
-4. **Compute USD** from the entry and the token counts. `inputTokens` is the total prompt size including cache reads; cache reads are billed at the cached rate and the remainder at the input rate. If `tier_threshold_tokens` is set and input exceeds it, the over-threshold rates apply. A run with all-zero counts prices to `0`.
+4. **Compute USD** from the entry and the token counts. `inputTokens` is the total prompt size including cache reads; cache reads are billed at the cached rate (the input rate when no cached rate exists) and the remainder at the input rate. Tiered models follow "Long-context tiers are per request" below. A run with all-zero counts prices to `0`.
 
 ---
 
@@ -116,6 +116,18 @@ The server estimator (below) is stricter than `priceUsd`: it requires an explici
 ## Known approximations
 
 These are real and intentional. Documented here so maintainers and users do not have to rediscover them.
+
+### Long-context tiers are per request
+
+`tier_threshold_tokens` is a per-request context threshold (models.dev `context_over_200k`, LiteLLM `*_above_200k_tokens`). A run's token counts are an aggregate over many requests, so `priceUsd` never splits a run at the threshold. A caller that knows the request tier passes `contextTier` (the server uses `pricingContext.contextTier` from the receipt): `long` bills the whole request's non-cached input and output at the `over_threshold_*` rates (cache reads keep the cached rate, because the catalog has no over-threshold cached rate); `short` bills at the base rates. With no tier, a tiered model is priced at base rates only while total input stays at or below the threshold; above it the result is `null` and the receipt stays `unpriced`.
+
+### Missing cached rates
+
+When neither models.dev nor LiteLLM publishes a cache-read rate, `cached_input_per_mtok` is left unset and `priceUsd` bills cache reads at the input rate (an overestimate). Entries generated before this rule may carry the input rate in `cached_input_per_mtok` even where LiteLLM has a real, lower cache rate (the merge used to let models.dev's filled-in value win); the next `refresh` corrects them, and until then those rows are conservative overestimates.
+
+### Private workspace package
+
+`@paperclipai/pricing` is a private workspace package, not published to npm. This fork runs from source; do not add it to the release package manifest.
 
 ### Bedrock region collapse
 

@@ -14,6 +14,8 @@ import {
   environmentLeases,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueRelations,
+  issues,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -103,6 +105,8 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
     await db.delete(budgetPolicies);
+    await db.delete(issueRelations);
+    await db.delete(issues);
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(companies);
@@ -280,6 +284,33 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
     }, 20_000);
   });
   describe("queries", () => {
+    it("suppresses retries for tasks with a persisted monitor or an open explicit blocker", async () => {
+      const { companyId, agentId } = await seedAgent();
+      const queries = createAutoRetryQueries(db);
+      const insertIssue = async (extra: Partial<typeof issues.$inferInsert> = {}) => {
+        const id = randomUUID();
+        await db.insert(issues).values({
+          id, companyId, title: "Task", status: "in_progress", priority: "medium",
+          responsibleUserId: "responsible-user", assigneeAgentId: agentId, ...extra,
+        });
+        return id;
+      };
+      const plain = await insertIssue();
+      const base = { runId: randomUUID(), companyId, agentId, taskKey: "t" };
+      await expect(queries.isIssueRecoverySuppressed({ ...base, issueId: plain })).resolves.toBe(false);
+      await expect(queries.isIssueRecoverySuppressed({ ...base, issueId: null })).resolves.toBe(false);
+
+      const monitored = await insertIssue({ monitorNextCheckAt: new Date(Date.now() + 60_000) });
+      await expect(queries.isIssueRecoverySuppressed({ ...base, issueId: monitored })).resolves.toBe(true);
+
+      const blocked = await insertIssue();
+      const blocker = await insertIssue();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker, relatedIssueId: blocked, type: "blocks" });
+      await expect(queries.isIssueRecoverySuppressed({ ...base, issueId: blocked })).resolves.toBe(true);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, blocker));
+      await expect(queries.isIssueRecoverySuppressed({ ...base, issueId: blocked })).resolves.toBe(false);
+    });
+
     it("counts only this agent's failed or timed-out runs for the task inside the window", async () => {
       const { companyId, agentId } = await seedAgent();
       const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -303,7 +334,7 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
       await insertRun("failed", "other-task", recent);
       const queries = createAutoRetryQueries(db);
       await expect(
-        queries.countRecentTaskFailures({ runId: randomUUID(), companyId, agentId, taskKey: "t" }, since),
+        queries.countRecentTaskFailures({ runId: randomUUID(), companyId, agentId, taskKey: "t", issueId: null }, since),
       ).resolves.toBe(2);
     });
 
@@ -314,7 +345,7 @@ describeEmbeddedPostgres("heartbeat auto-requeue after failure", () => {
         id: parentId, companyId, agentId, invocationSource: "on_demand", status: "failed", contextSnapshot: { taskKey: "t" },
       });
       const queries = createAutoRetryQueries(db);
-      const candidate = { runId: parentId, companyId, agentId, taskKey: "t" };
+      const candidate = { runId: parentId, companyId, agentId, taskKey: "t", issueId: null };
       await expect(queries.hasScheduledSuccessor(candidate)).resolves.toBe(false);
       await db.insert(heartbeatRuns).values({
         id: randomUUID(), companyId, agentId, invocationSource: "automation", status: "scheduled_retry",

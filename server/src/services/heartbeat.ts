@@ -85,6 +85,7 @@ import {
   AUTO_RETRY_MAX_ATTEMPTS,
   AUTO_RETRY_REASON,
   AUTO_RETRY_WAKE_REASON,
+  attemptAutoRetry,
   createAutoRetryPolicy,
   createAutoRetryQueries,
   type AutoRetrySource,
@@ -1583,47 +1584,36 @@ export function heartbeatService(
     const isFirstHeartbeat =
       options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt;
 
-    const runningCount = await countRunningRunsForAgent(agentId);
     // Auto-requeue goes through upstream's bounded retry scheduler so its gates
     // (external runs, completion-outbox ownership, invalid tool definitions,
-    // invokability, retry budget) apply. The agent stays idle only when a retry
-    // was actually scheduled. keepIdleOnFailure marks failures a blind retry
+    // invokability, budget, retry budget) apply. The agent stays idle only when a
+    // retry was actually scheduled. keepIdleOnFailure marks failures a blind retry
     // cannot fix (quota, workspace conflicts), so those never auto-requeue.
-    let willAutoRetry = false;
-    const autoRetrySource = options?.autoRetry;
-    if (
-      autoRetrySource &&
-      runningCount === 0 &&
+    const willAutoRetry =
+      options?.autoRetry !== undefined &&
       (outcome === "failed" || outcome === "timed_out") &&
-      !options?.keepIdleOnFailure &&
-      (await autoRetryPolicy.shouldAutoRetry({
-        runId: autoRetrySource.runId,
-        companyId: existing.companyId,
-        agentId,
-        taskKey: autoRetrySource.taskKey,
-      }))
-    ) {
-      const scheduled = await scheduleBoundedRetry(autoRetrySource.runId, {
-        retryReason: AUTO_RETRY_REASON,
-        wakeReason: AUTO_RETRY_WAKE_REASON,
-        maxAttempts: AUTO_RETRY_MAX_ATTEMPTS - 1,
-        delayMs: AUTO_RETRY_DELAY_MS,
-      }).catch((err) => {
-        logger.warn({ err, agentId, runId: autoRetrySource.runId }, "auto-retry scheduling failed");
-        return null;
-      });
-      willAutoRetry = scheduled?.outcome === "scheduled";
-      logger.info(
-        {
+      !options.keepIdleOnFailure &&
+      (await attemptAutoRetry({
+        policy: autoRetryPolicy,
+        candidate: {
+          runId: options.autoRetry.runId,
+          companyId: existing.companyId,
           agentId,
-          runId: autoRetrySource.runId,
-          taskKey: autoRetrySource.taskKey,
-          retryOutcome: scheduled?.outcome ?? "error",
-          reason: scheduled && "reason" in scheduled ? scheduled.reason : undefined,
+          taskKey: options.autoRetry.taskKey,
+          issueId: options.autoRetry.issueId,
         },
-        willAutoRetry ? "auto-retry scheduled after failure" : "auto-retry not scheduled",
-      );
-    }
+        schedule: () =>
+          scheduleBoundedRetry(options.autoRetry!.runId, {
+            retryReason: AUTO_RETRY_REASON,
+            wakeReason: AUTO_RETRY_WAKE_REASON,
+            maxAttempts: AUTO_RETRY_MAX_ATTEMPTS - 1,
+            delayMs: AUTO_RETRY_DELAY_MS,
+          }),
+        log: logger,
+      }));
+    // Re-read right before deciding: a run may have started or finished while
+    // the retry was being evaluated.
+    const runningCount = await countRunningRunsForAgent(agentId);
     const nextStatus =
       runningCount > 0
         ? "running"
@@ -4064,13 +4054,24 @@ export function heartbeatService(
       return rows;
     },
 
-    /** The newest run of each agent in the company, kept only when it failed or timed out. */
+    /**
+     * Each non-terminated agent's newest run, kept only when it failed or timed
+     * out. Same definition as the sidebar failed-runs badge (company-matched,
+     * non-terminated agents). The lateral lookup reads one run per agent instead
+     * of scanning the company's whole run history.
+     */
     latestFailed: async (companyId: string) => {
       const latest = await db.execute<{ id: string; status: string }>(sql`
-        select distinct on (agent_id) id, status
-        from heartbeat_runs
-        where company_id = ${companyId}
-        order by agent_id, created_at desc, id desc
+        select latest.id, latest.status
+        from agents
+        cross join lateral (
+          select run.id, run.status
+          from heartbeat_runs as run
+          where run.company_id = agents.company_id and run.agent_id = agents.id
+          order by run.created_at desc, run.id desc
+          limit 1
+        ) as latest
+        where agents.company_id = ${companyId} and agents.status <> 'terminated'
       `);
       const failedRunIds = latest
         .filter((row) => row.status === "failed" || row.status === "timed_out")

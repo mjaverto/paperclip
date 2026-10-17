@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lookupKey, normalizeKey } from '../normalize.js';
+import { entryFromLiteLLM, entryFromModelsDev, lookupKey, mergeCatalogs, normalizeKey } from '../normalize.js';
 import { resolveBedrockAlias, STATIC_ALIASES } from '../aliases.js';
 
 describe('normalizeKey', () => {
@@ -81,5 +81,37 @@ describe('lookupKey', () => {
 
   it('lowercases provider and model', () => {
     expect(lookupKey('Anthropic', 'Claude-Sonnet-4-6')).toBe('anthropic/claude-sonnet-4-6');
+  });
+});
+
+describe('catalog entry construction', () => {
+  it('leaves the cached rate unset when models.dev omits cache_read', () => {
+    const entry = entryFromModelsDev({ providerId: 'p', modelId: 'm', cost: { input: 2, output: 8 } });
+    expect(entry).toEqual({ input_per_mtok: 2, output_per_mtok: 8, source: 'models.dev' });
+  });
+
+  it('maps models.dev context_over_200k into the per-request tier', () => {
+    const entry = entryFromModelsDev({
+      providerId: 'p',
+      modelId: 'm',
+      cost: { input: 2, output: 8, cache_read: 0.2, context_over_200k: { input: 4, output: 12 } },
+    });
+    expect(entry).toMatchObject({
+      cached_input_per_mtok: 0.2,
+      tier_threshold_tokens: 200_000,
+      over_threshold_input_per_mtok: 4,
+      over_threshold_output_per_mtok: 12,
+    });
+  });
+
+  it('keeps LiteLLM\'s cached rate when models.dev has none', () => {
+    const modelsDev = { 'p/m': entryFromModelsDev({ providerId: 'p', modelId: 'm', cost: { input: 2, output: 8 } })! };
+    const liteLLM = {
+      'p/m': entryFromLiteLLM({
+        key: 'p/m',
+        data: { input_cost_per_token: 0.000002, output_cost_per_token: 0.000008, cache_read_input_token_cost: 0.0000002 },
+      })!,
+    };
+    expect(mergeCatalogs(modelsDev, liteLLM)['p/m']).toMatchObject({ input_per_mtok: 2, cached_input_per_mtok: 0.2, source: 'merged' });
   });
 });

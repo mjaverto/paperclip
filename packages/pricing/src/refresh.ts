@@ -43,6 +43,7 @@ interface ModelsDevModel {
     cache_read?: number;
     cache_write?: number;
     reasoning?: number;
+    context_over_200k?: { input?: number; output?: number };
   };
 }
 

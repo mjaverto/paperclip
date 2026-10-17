@@ -165,6 +165,8 @@ const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string 
 const RUN_LOG_PAGE_BYTES = 256_000;
 /** Runs fetched per page for the agent run list and its "Load older runs" control. */
 const AGENT_RUNS_PAGE_SIZE = 50;
+/** Bounds how much history the run list can accumulate in memory (50 x 20 = 1000 runs). */
+const AGENT_RUNS_MAX_PAGES = 20;
 
 const REDACTED_ENV_VALUE = "***REDACTED***";
 const SECRET_ENV_KEY_RE =
@@ -940,7 +942,9 @@ export function AgentDetail() {
       heartbeatsApi.list(resolvedCompanyId!, agent?.id ?? undefined, AGENT_RUNS_PAGE_SIZE, { offset: pageParam }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) =>
-      lastPage.length < AGENT_RUNS_PAGE_SIZE ? undefined : allPages.length * AGENT_RUNS_PAGE_SIZE,
+      lastPage.length < AGENT_RUNS_PAGE_SIZE || allPages.length >= AGENT_RUNS_MAX_PAGES
+        ? undefined
+        : allPages.length * AGENT_RUNS_PAGE_SIZE,
     enabled: !!resolvedCompanyId && !!agent?.id && shouldLoadHeartbeats,
   });
   const heartbeats = useMemo(() => {

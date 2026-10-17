@@ -1,6 +1,6 @@
 import { centsToUsd, unitsToCents, usdToUnits } from "@paperclipai/shared";
 import type { AdapterUsageCheckpoint } from "@paperclipai/adapter-utils";
-import { priceUsd } from "@paperclipai/pricing";
+import { catalogVersion, priceUsd } from "@paperclipai/pricing";
 
 // Providers whose rate cards live in anthropic-pricing.ts / codex-pricing.ts.
 // Those modules deliberately leave unqualified models unpriced; the vendored
@@ -11,7 +11,10 @@ const RATE_CARD_PROVIDERS = new Set(["anthropic", "openai"]);
 // billed would invent spend.
 const CATALOG_BILLING_TYPES = new Set(["api", "metered_api", "credits"]);
 
-export const CATALOG_PRICING_VERSION = "pricing-catalog/v1";
+/** Provenance version: pins the exact catalog snapshot (content hash) a price was computed from. */
+export function catalogPricingVersion(): string {
+  return `pricing-catalog/${catalogVersion()}`;
+}
 
 /**
  * Fallback estimator for receipts that carry token counts but no cost and whose
@@ -32,6 +35,7 @@ export function priceCatalogReceipt(receipt: AdapterUsageCheckpoint): AdapterUsa
   const cachedInputTokens = usage.cachedInputTokens ?? 0;
   const counts = [usage.inputTokens, cachedInputTokens, usage.outputTokens];
   if (counts.some((count) => !Number.isSafeInteger(count) || count < 0)) return receipt;
+  const contextTier = receipt.pricingContext?.contextTier ?? null;
   const usd = priceUsd({
     provider,
     model,
@@ -40,6 +44,7 @@ export function priceCatalogReceipt(receipt: AdapterUsageCheckpoint): AdapterUsa
     inputTokens: usage.inputTokens + cachedInputTokens,
     cachedInputTokens,
     outputTokens: usage.outputTokens,
+    contextTier,
     billingType: receipt.billingType === "api" ? "metered_api" : receipt.billingType,
   });
   if (usd === null || !Number.isFinite(usd)) return receipt;
@@ -49,8 +54,9 @@ export function priceCatalogReceipt(receipt: AdapterUsageCheckpoint): AdapterUsa
     costStatus: "estimated",
     pricingProvenance: {
       source: "rate_card",
-      version: CATALOG_PRICING_VERSION,
-      evidence: "Vendored models.dev + LiteLLM catalog (packages/pricing); standard-tier list price estimate, not an invoice; cache writes billed at the input rate",
+      version: catalogPricingVersion(),
+      evidence: "Vendored models.dev + LiteLLM catalog (packages/pricing); list price estimate, not an invoice; cache writes billed at the input rate; long-context premium only when the receipt reports a long context tier",
+      ...(contextTier ? { contextTier } : {}),
     },
   };
 }

@@ -682,6 +682,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       },
     );
 
+    let conversationSettled = false;
     const finalizedRun = persistedRun ?? (await getRun(run.id));
     if (finalizedRun) {
       await appendRunEvent(finalizedRun, {
@@ -897,7 +898,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         agent,
         resolvedPresentationDecision,
       );
-      const conversationSettled = await settleConversationTurn(db, livenessRun);
+      conversationSettled = await settleConversationTurn(db, livenessRun);
       await releaseIssueExecutionAndPromote(livenessRun, {
         suppressImmediateRecovery: conversationSettled ||
           readNonEmptyString(
@@ -1030,7 +1031,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           : runErrorCode === "provider_quota") ||
           isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
       wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-      autoRetry: autoRetrySourceForRun(run),
+      autoRetry: autoRetrySourceForRun(finalizedRun ?? run, { suppressed: conversationSettled }),
     });
   }
 
@@ -1058,6 +1059,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       normalizeResponsibleUserDenialCode(
         (await getRun(run.id).catch(() => null))?.errorCode,
       );
+    let retryRunFacts: typeof heartbeatRuns.$inferSelect | null = null;
     // The runtime resolution is scoped to the adapter try block. The
     // durable coordinator is also the stronger authority here: legacy
     // runs simply have no row, while native result-less exhaustion keeps
@@ -1179,6 +1181,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       });
       const livenessRun =
         (await measureRunPhase("completion.liveness", () => classifyAndPersistRunLiveness(failedRun))) ?? failedRun;
+      retryRunFacts = livenessRun;
       try {
         await completeSkillTestRunForHeartbeatOutcome({
           run: livenessRun,
@@ -1257,11 +1260,15 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
     await finalizeAgentStatus(agent.id, "failed", message, {
       wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-      // Workspace/configuration failures are deterministic: no agent attempt ran, so a blind retry cannot help.
-      autoRetry:
-        workspaceValidationFailure || configurationIncompleteFailure
-          ? undefined
-          : autoRetrySourceForRun(run),
+      // Deterministic setup failures (no agent attempt ran), native terminal failures and
+      // failures a durable authentication/denial record already owns are not blind-retryable.
+      autoRetry: autoRetrySourceForRun(retryRunFacts ?? run, {
+        suppressed:
+          Boolean(workspaceValidationFailure) ||
+          Boolean(configurationIncompleteFailure) ||
+          nativeTerminalFailureCode !== null ||
+          recordedResponsibleUserDenialCode !== null,
+      }),
       keepIdleOnFailure:
         Boolean(nonRetryablePreflightFailureCode(err)) ||
         isWorkspaceSyncConflictFailure(message),

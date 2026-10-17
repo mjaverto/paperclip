@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { catalog, priceUsd } from '../index.js';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { catalog, catalogVersion, priceUsd } from '../index.js';
 
 /**
  * priceUsd integration tests against the vendored catalog snapshot.
@@ -155,7 +155,7 @@ describe('priceUsd', () => {
 
   it('prices cached input tokens at the cached rate, not the input rate', () => {
     const entry = catalog['anthropic/claude-opus-4-6']!;
-    expect(entry.cached_input_per_mtok).toBeLessThan(entry.input_per_mtok);
+    expect(entry.cached_input_per_mtok!).toBeLessThan(entry.input_per_mtok);
 
     // 1M total input tokens, 800k of which are cache reads.
     const result = priceUsd({
@@ -168,7 +168,7 @@ describe('priceUsd', () => {
 
     // Expected: 200k @ input rate + 800k @ cached rate.
     const expected = (200_000 / 1_000_000) * entry.input_per_mtok +
-      (800_000 / 1_000_000) * entry.cached_input_per_mtok;
+      (800_000 / 1_000_000) * entry.cached_input_per_mtok!;
     expect(result).toBeCloseTo(expected, 6);
   });
 
@@ -186,75 +186,68 @@ describe('priceUsd', () => {
     expect(result!).toBeGreaterThan(0);
   });
 
-  describe('tier threshold pricing', () => {
-    // claude-4-sonnet-20250514 has a 200k threshold in the snapshot.
-    const TIERED_KEY = 'anthropic/claude-4-sonnet-20250514';
+  describe('tier threshold pricing (per-request tiers, never split on a run aggregate)', () => {
+    // A synthetic entry keeps these assertions deterministic as the vendored snapshot rotates.
+    const KEY = 'tierprov/tiered-model';
+    const THRESHOLD = 200_000;
+    const input = { provider: 'tierprov', model: 'tiered-model' };
 
-    it('uses the base rate when input is at or below the threshold', () => {
-      const entry = catalog[TIERED_KEY];
-      if (!entry || entry.tier_threshold_tokens == null) return;
-
-      const tokens = entry.tier_threshold_tokens; // exactly at threshold
-      const result = priceUsd({
-        provider: 'anthropic',
-        model: 'claude-4-sonnet-20250514',
-        inputTokens: tokens,
-        outputTokens: 0,
-      });
-      const expected = (tokens / 1_000_000) * entry.input_per_mtok;
-      expect(result).toBeCloseTo(expected, 6);
+    beforeAll(() => {
+      catalog[KEY] = {
+        input_per_mtok: 3,
+        cached_input_per_mtok: 0.3,
+        output_per_mtok: 15,
+        tier_threshold_tokens: THRESHOLD,
+        over_threshold_input_per_mtok: 6,
+        over_threshold_output_per_mtok: 22.5,
+        source: 'litellm',
+      };
+    });
+    afterAll(() => {
+      delete catalog[KEY];
     });
 
-    it('uses the tier rate ONLY for the excess portion above the threshold', () => {
-      const entry = catalog[TIERED_KEY];
-      if (
-        !entry ||
-        entry.tier_threshold_tokens == null ||
-        entry.over_threshold_input_per_mtok == null
-      ) {
-        return;
-      }
-      const threshold = entry.tier_threshold_tokens;
-      const excess = 50_000;
-      const total = threshold + excess;
-
-      const result = priceUsd({
-        provider: 'anthropic',
-        model: 'claude-4-sonnet-20250514',
-        inputTokens: total,
-        outputTokens: 0,
-      });
-
-      const expected =
-        (threshold / 1_000_000) * entry.input_per_mtok +
-        (excess / 1_000_000) * entry.over_threshold_input_per_mtok;
-      expect(result).toBeCloseTo(expected, 6);
+    it('bills at base rates when total input is at or below the threshold', () => {
+      const result = priceUsd({ ...input, inputTokens: THRESHOLD, outputTokens: 1_000_000 });
+      expect(result).toBeCloseTo((THRESHOLD / 1_000_000) * 3 + 15, 6);
     });
 
-    it('applies tier rate to output when input exceeds the threshold', () => {
-      const entry = catalog[TIERED_KEY];
-      if (
-        !entry ||
-        entry.tier_threshold_tokens == null ||
-        entry.over_threshold_output_per_mtok == null
-      ) {
-        return;
-      }
-      const threshold = entry.tier_threshold_tokens;
+    it('returns unpriced above the threshold when the request tier is unknown', () => {
+      expect(priceUsd({ ...input, inputTokens: THRESHOLD + 1, outputTokens: 10 })).toBeNull();
+    });
 
+    it('bills a short-tier run at base rates however large the aggregate is', () => {
+      const result = priceUsd({ ...input, inputTokens: 1_000_000, outputTokens: 1_000_000, contextTier: 'short' });
+      expect(result).toBeCloseTo(3 + 15, 6);
+    });
+
+    it('bills the whole request, not just the excess, at over-threshold rates for a long-tier run', () => {
       const result = priceUsd({
-        provider: 'anthropic',
-        model: 'claude-4-sonnet-20250514',
-        inputTokens: threshold + 1, // just over threshold
+        ...input,
+        inputTokens: 1_000_000,
+        cachedInputTokens: 500_000,
         outputTokens: 1_000_000,
+        contextTier: 'long',
       });
+      // 500k uncached @ 6 + 500k cached @ 0.3 (no long-context cache premium) + 1M output @ 22.5.
+      expect(result).toBeCloseTo(0.5 * 6 + 0.5 * 0.3 + 22.5, 6);
+    });
 
-      // Output should be priced at the over-threshold rate.
-      const inputCost =
-        (threshold / 1_000_000) * entry.input_per_mtok +
-        (1 / 1_000_000) * entry.over_threshold_input_per_mtok!;
-      const outputCost = (1_000_000 / 1_000_000) * entry.over_threshold_output_per_mtok;
-      expect(result).toBeCloseTo(inputCost + outputCost, 6);
+    it('returns unpriced for a long-tier run when the entry has no over-threshold rates', () => {
+      catalog[KEY] = { ...catalog[KEY]!, over_threshold_input_per_mtok: undefined, over_threshold_output_per_mtok: undefined };
+      expect(priceUsd({ ...input, inputTokens: 10, outputTokens: 10, contextTier: 'long' })).toBeNull();
+    });
+
+    it('falls back to the input rate when the catalog has no cached rate', () => {
+      catalog[KEY] = { ...catalog[KEY]!, cached_input_per_mtok: undefined, tier_threshold_tokens: undefined };
+      expect(priceUsd({ ...input, inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0 })).toBeCloseTo(3, 6);
+    });
+  });
+
+  describe('catalogVersion', () => {
+    it('is a stable 12-char content hash', () => {
+      expect(catalogVersion()).toMatch(/^[0-9a-f]{12}$/);
+      expect(catalogVersion()).toBe(catalogVersion());
     });
   });
 

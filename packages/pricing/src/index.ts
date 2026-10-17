@@ -8,6 +8,7 @@
  * wins when present; the pricing service is the safety net.
  */
 
+import { createHash } from 'node:crypto';
 import catalogJson from '../data/catalog.json' with { type: 'json' };
 import { lookupKey } from './normalize.js';
 
@@ -16,8 +17,8 @@ export type PricingSource = 'models.dev' | 'litellm' | 'merged';
 export interface CatalogEntry {
   /** USD per million input tokens at the base tier. */
   input_per_mtok: number;
-  /** USD per million cache-read tokens. Falls back to `input_per_mtok` if upstream omits it. */
-  cached_input_per_mtok: number;
+  /** USD per million cache-read tokens. Absent when upstream does not publish one; pricing falls back to `input_per_mtok`. */
+  cached_input_per_mtok?: number;
   /** USD per million cache-create tokens (Anthropic surfaces this separately). */
   cache_write_per_mtok?: number;
   /** USD per million output tokens at the base tier. */
@@ -43,6 +44,14 @@ export type Catalog = Record<string, CatalogEntry>;
  * (rather than calling out to the network at runtime).
  */
 export const catalog: Catalog = catalogJson as Catalog;
+
+let cachedCatalogVersion: string | null = null;
+
+/** Short content hash of the vendored catalog, so provenance pins the exact snapshot priced against. */
+export function catalogVersion(): string {
+  cachedCatalogVersion ??= createHash('sha256').update(JSON.stringify(catalog)).digest('hex').slice(0, 12);
+  return cachedCatalogVersion;
+}
 
 // ---------------------------------------------------------------------------
 // Lookup API
@@ -77,6 +86,12 @@ export interface PriceUsdInput {
    */
   reasoningTokens?: number;
   /**
+   * Per-request context tier the run was billed at (`pricingContext.contextTier`
+   * on usage receipts). Needed to price a tiered model once total input exceeds
+   * its threshold.
+   */
+  contextTier?: 'short' | 'long' | null;
+  /**
    * Adapter-reported billing type. When set and not in the allowlist
    * (`metered_api`, `credits`, `unknown`), the lookup is skipped entirely and
    * we return null — pricing the catalog rate for a `subscription_included`
@@ -91,18 +106,19 @@ export interface PriceUsdInput {
  * Returns `number | null`:
  *   - `0` when all token counts are zero (genuine no-op run).
  *   - a positive number when the catalog has an entry for the model.
- *   - `null` when the lookup fails or `billingType` is outside the allowlist.
+ *   - `null` when the lookup fails, `billingType` is outside the allowlist, or
+ *     the model is tiered and the run's tier cannot be established.
  *
  * The caller (heartbeat) is responsible for converting USD → cents.
  *
- * Tiering: when `entry.tier_threshold_tokens` is set and `inputTokens` exceeds
- * it, the *excess* portion is priced at `over_threshold_input_per_mtok` and the
- * portion at-or-below the threshold stays on the base rate. Output tokens
- * follow the same rule against the input tier threshold (LiteLLM publishes a
- * single threshold per model, not per axis).
+ * Tiering: `tier_threshold_tokens` describes a per-request context threshold.
+ * Per-run aggregates never split at it. With `contextTier: 'long'` the whole
+ * request (non-cached input and output) bills at the over-threshold rates; with
+ * `'short'` at the base rates; with no `contextTier` the base rates apply only
+ * while total input stays at or below the threshold, otherwise the result is
+ * `null` (unpriced) rather than a guess.
  *
- * Cache-write tokens are not used in this PR — no adapter currently reports
- * cache-write separately. The catalog field stays populated for a follow-up.
+ * Cache-write tokens are not priced separately: no adapter reports them here.
  */
 export function priceUsd(input: PriceUsdInput): number | null {
   const { provider, model, inputTokens, outputTokens } = input;
@@ -134,43 +150,40 @@ export function priceUsd(input: PriceUsdInput): number | null {
     return 0;
   }
 
+  // ---- Tier ----
+  // Long-context tiers are per request, but `inputTokens` is a whole-run total, so
+  // summing it against the threshold would mis-bill runs made of many short
+  // requests. The caller must say which tier applied; without that, a run whose
+  // total prompt size exceeds the threshold cannot be priced.
+  let useOverThresholdRates = false;
+  if (entry.tier_threshold_tokens != null) {
+    if (input.contextTier === 'long') {
+      if (
+        typeof entry.over_threshold_input_per_mtok !== 'number' ||
+        typeof entry.over_threshold_output_per_mtok !== 'number'
+      ) {
+        return null;
+      }
+      useOverThresholdRates = true;
+    } else if (input.contextTier !== 'short' && inputTokens > entry.tier_threshold_tokens) {
+      return null;
+    }
+  }
+
   // ---- Input ----
   // Cache-reads are billed at the cached rate; the remainder of input tokens at
-  // the input rate. Tiering is applied only to non-cached input tokens.
+  // the input rate (the over-threshold rate for a long-context request).
   const billedInputTokens = Math.max(0, inputTokens - cachedInputTokens);
-  let inputCost = 0;
-  if (
-    entry.tier_threshold_tokens != null &&
-    typeof entry.over_threshold_input_per_mtok === 'number' &&
-    billedInputTokens > entry.tier_threshold_tokens
-  ) {
-    const baseTokens = entry.tier_threshold_tokens;
-    const overTokens = billedInputTokens - baseTokens;
-    inputCost =
-      perMtok(baseTokens, entry.input_per_mtok) +
-      perMtok(overTokens, entry.over_threshold_input_per_mtok);
-  } else {
-    inputCost = perMtok(billedInputTokens, entry.input_per_mtok);
-  }
+  const inputRate = useOverThresholdRates ? entry.over_threshold_input_per_mtok! : entry.input_per_mtok;
+  const inputCost = perMtok(billedInputTokens, inputRate);
 
-  // Cache-read tokens never tier — they're billed at the (typically deeply
-  // discounted) cached rate regardless of context length.
-  const cachedCost = perMtok(cachedInputTokens, entry.cached_input_per_mtok);
+  // Cache-read tokens never take the long-context premium: the catalog carries
+  // no over-threshold cached rate. Unknown cached rate falls back to the input rate.
+  const cachedCost = perMtok(cachedInputTokens, entry.cached_input_per_mtok ?? entry.input_per_mtok);
 
   // ---- Output ----
-  // Output tier uses the same threshold as input (LiteLLM publishes one
-  // threshold per model). Tier off `inputTokens` since the long-context
-  // surcharge applies when the *prompt* is long, not when the *response* is.
-  let outputCost = 0;
-  if (
-    entry.tier_threshold_tokens != null &&
-    typeof entry.over_threshold_output_per_mtok === 'number' &&
-    inputTokens > entry.tier_threshold_tokens
-  ) {
-    outputCost = perMtok(outputTokens, entry.over_threshold_output_per_mtok);
-  } else {
-    outputCost = perMtok(outputTokens, entry.output_per_mtok);
-  }
+  const outputRate = useOverThresholdRates ? entry.over_threshold_output_per_mtok! : entry.output_per_mtok;
+  const outputCost = perMtok(outputTokens, outputRate);
 
   // ---- Reasoning ----
   // Only price reasoning tokens separately when the catalog has a dedicated
