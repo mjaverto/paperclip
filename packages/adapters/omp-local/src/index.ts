@@ -38,6 +38,20 @@ OMP-specific fields:
 - noPty (boolean, optional): pass --no-pty to disable PTY-based interactive bash execution
 - maxTimeSec (number, optional): stop the session after this duration, passed via --max-time
 
+Advisor roster:
+- Add a WATCHDOG.yml file next to the entry instructions file (in the same instructions
+  bundle) to give this agent its own advisor roster: named reviewers with their own
+  model, review mode (turn or agent-end), tool grants, and per-advisor prompts. OMP
+  discovers the roster at <agent dir>/WATCHDOG.yml, and Paperclip stages the bundle's
+  roster into the managed agent dir for each run, so different agents can run
+  different advisors. The run overlay enables the advisor subsystem only when a
+  roster was staged; agents without a roster keep advisors off and never start the
+  operator's own advisor models.
+- The roster requires PAPERCLIP_OMP_PROVIDERS (declarative providers): the staged
+  agent dir replaces the host agent dir wholesale, so it must be self-contained. With
+  a roster but no providers config the roster is not staged and the run surfaces a
+  config-gap note instead.
+
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds
 - graceSec (number, optional): SIGTERM grace period in seconds
@@ -65,4 +79,7 @@ Notes:
 - Agent instructions are appended to OMP's system prompt via --append-system-prompt, while the user task is sent as the positional prompt.
 - Headless runs pass --approval-mode yolo explicitly so a host-side always-ask approval setting cannot block non-interactive execution.
 - Custom/OpenAI-compatible endpoints are supported via PAPERCLIP_OMP_PROVIDERS (same providers JSON shape as pi, materialized into a managed models.yml pointed at by PI_CODING_AGENT_DIR, which OMP honors).
+- A WATCHDOG.yml sibling of the entry instructions file is the per-agent advisor
+  roster (see "Advisor roster" above); reviewers run with the agent each heartbeat
+  when PAPERCLIP_OMP_PROVIDERS is also configured.
 `;
