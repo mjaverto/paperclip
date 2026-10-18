@@ -89,6 +89,27 @@ function parseModelId(model: string | null): string | null {
   return trimmed.slice(trimmed.indexOf("/") + 1).trim() || null;
 }
 
+// OMP discovers the advisor roster at <active agent dir>/WATCHDOG.yml (a .yaml
+// fallback at the same scope, with .yml winning), so the agent's instructions
+// bundle keeps the roster as a sibling of the entry file and the adapter stages
+// it into the managed agent dir per run. Same precedence as OMP's discovery.
+const OMP_WATCHDOG_FILENAMES = ["WATCHDOG.yml", "WATCHDOG.yaml"] as const;
+
+// Read the first roster candidate that is a regular non-empty file. A missing
+// or empty roster is the "advisors off" case, not an error: the run proceeds
+// exactly like an agent that never configured advisors.
+async function readOmpAdvisorRoster(bundleDir: string): Promise<string | null> {
+  if (!bundleDir) return null;
+  for (const filename of OMP_WATCHDOG_FILENAMES) {
+    const candidate = path.join(bundleDir, filename);
+    const stat = await fs.stat(candidate).catch(() => null);
+    if (!stat?.isFile()) continue;
+    const contents = await fs.readFile(candidate, "utf8").catch(() => null);
+    if (contents !== null && contents.trim().length > 0) return contents;
+  }
+  return null;
+}
+
 // Host-level skill sources OMP loads by default (enableAgentsUser pulls in the
 // operator's personal agents skills home, enablePiUser the pi home, etc.).
 // Paperclip stages exactly this agent's skills into a per-run dir and disables
@@ -102,17 +123,19 @@ const OMP_HOST_SKILL_SOURCES = [
 ] as const;
 
 // One overlay shape for local and remote runs. Host-level skill sources are
-// disabled and only the staged Paperclip skills dir is enabled; advisor,
-// memory, and autolearn are also off so live OMP agents neither start the
-// operator's advisor models nor persist run learnings to the host home.
-// JSON is a valid YAML subset, so no YAML serializer dep is needed.
-export function buildOmpRunOverlay(skillsDir: string): string {
+// disabled and only the staged Paperclip skills dir is enabled; memory and
+// autolearn are off so live OMP agents never persist run learnings to the
+// host home. The advisor is on only when this run staged a per-agent
+// WATCHDOG.yml roster into the managed agent dir; otherwise it stays off so
+// live agents never start the operator's own advisor models. JSON is a valid
+// YAML subset, so no YAML serializer dep is needed.
+export function buildOmpRunOverlay(skillsDir: string, advisorsEnabled: boolean): string {
   return `${JSON.stringify({
     skills: {
       ...Object.fromEntries(OMP_HOST_SKILL_SOURCES.map((key) => [key, false])),
       customDirectories: [skillsDir],
     },
-    advisor: { enabled: false },
+    advisor: { enabled: advisorsEnabled },
     memory: { backend: "off" },
     autolearn: { enabled: false },
   }, null, 2)}\n`;
@@ -162,9 +185,13 @@ async function buildOmpSkillsStage(
   };
 }
 
-async function writeOmpSkillsOverlay(stage: OmpSkillsStage, skillsDir: string): Promise<string> {
+async function writeOmpSkillsOverlay(
+  stage: OmpSkillsStage,
+  skillsDir: string,
+  advisorsEnabled: boolean,
+): Promise<string> {
   const overlayPath = path.join(stage.stageDir, "overlay.yml");
-  await fs.writeFile(overlayPath, buildOmpRunOverlay(skillsDir), "utf8");
+  await fs.writeFile(overlayPath, buildOmpRunOverlay(skillsDir, advisorsEnabled), "utf8");
   return overlayPath;
 }
 
@@ -181,9 +208,10 @@ async function writeRemoteOmpSkillsOverlay(input: {
   onLog: AdapterExecutionContext["onLog"];
   runtimeRootDir: string;
   remoteSkillsDir: string;
+  advisorsEnabled: boolean;
 }): Promise<string> {
   const overlayPath = path.posix.join(input.runtimeRootDir, "omp-skills-overlay.yml");
-  const overlayYaml = buildOmpRunOverlay(input.remoteSkillsDir);
+  const overlayYaml = buildOmpRunOverlay(input.remoteSkillsDir, input.advisorsEnabled);
   const quotedOverlayPath = shellQuote(overlayPath);
   const script = [
     "mkdir -p $(dirname " + quotedOverlayPath + ")",
@@ -459,10 +487,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
-  // Materialize custom OMP providers (PAPERCLIP_OMP_PROVIDERS) into a managed
-  // PI_CODING_AGENT_DIR before runtimeEnv is computed, so both local validation
-  // and the spawned OMP process resolve models against the managed models.yml.
-  const preparedRuntimeConfig = await prepareOmpRuntimeConfig({ env });
+  // Per-agent advisor roster: the instructions bundle may carry a WATCHDOG.yml
+  // (or .yaml) sibling of the entry file -- editable in the Paperclip UI and
+  // revisioned with the rest of the bundle. Stage it into the managed agent
+  // dir so live runs review with exactly this agent's advisors; agents without
+  // a roster keep today's behavior (advisor off, host agent dir untouched).
+  // Resolved before runtimeEnv is computed so local validation and the
+  // spawned OMP process see the same managed dir PAPERCLIP_OMP_PROVIDERS
+  // produces, and remote targets ship it through the same runtime asset.
+  const configuredInstructionsFilePath = asString(config.instructionsFilePath, "").trim();
+  const instructionsBundleDir = configuredInstructionsFilePath
+    ? path.dirname(path.resolve(cwd, configuredInstructionsFilePath))
+    : "";
+  const advisorRoster = await readOmpAdvisorRoster(instructionsBundleDir);
+  // Materialize custom OMP providers (PAPERCLIP_OMP_PROVIDERS) and the staged
+  // roster into a managed PI_CODING_AGENT_DIR before runtimeEnv is computed, so
+  // both local validation and the spawned OMP process resolve models and the
+  // advisor roster against the managed dir.
+  const preparedRuntimeConfig = await prepareOmpRuntimeConfig({ env, advisorRoster });
+  const advisorsEnabled = preparedRuntimeConfig.advisorEnabled;
   const localAgentConfigDir = preparedRuntimeConfig.agentConfigDir ?? "";
   if (localAgentConfigDir) {
     env.PI_CODING_AGENT_DIR = localAgentConfigDir;
@@ -627,7 +670,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     // Skills overlay: local runs read the staged overlay directly; remote runs
-    // write one referencing the in-sandbox skills dir.
+    // write one referencing the in-sandbox skills dir. The advisor enablement
+    // flag rides the same overlay, so a staged roster turns reviews on for
+    // local and remote targets alike.
     const overlayPath = executionTargetIsRemote
       ? remoteRuntimeRootDir && remoteSkillsDir
         ? await writeRemoteOmpSkillsOverlay({
@@ -640,9 +685,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             onLog,
             runtimeRootDir: remoteRuntimeRootDir,
             remoteSkillsDir,
+            advisorsEnabled,
           })
         : null
-      : await writeOmpSkillsOverlay(skillsStage, skillsStage.skillsDir);
+      : await writeOmpSkillsOverlay(skillsStage, skillsStage.skillsDir, advisorsEnabled);
 
     const runtimeSessionParams = parseObject(runtime.sessionParams);
     const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
@@ -698,8 +744,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       );
     }
 
-    // Handle instructions file and build system prompt extension
-    const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+    // Handle instructions file and build system prompt extension. The path
+    // was resolved once above the provider staging so the same resolution
+    // feeds both the advisor roster lookup and the system prompt here.
+    const instructionsFilePath = configuredInstructionsFilePath;
     const resolvedInstructionsFilePath = instructionsFilePath
       ? path.resolve(cwd, instructionsFilePath)
       : "";
