@@ -28,6 +28,55 @@ describe("prepareOmpRuntimeConfig", () => {
     expect(prepared.env).toEqual({ FOO: "bar" });
     expect(prepared.env.PI_CODING_AGENT_DIR).toBeUndefined();
     expect(prepared.notes).toEqual([]);
+    expect(prepared.advisorEnabled).toBe(false);
+    await prepared.cleanup();
+  });
+
+  it("does not stage a roster without providers and surfaces the config gap", async () => {
+    const roster = "advisors:\n- name: Gate\n  model: example/gate-model\n";
+    const prepared = await prepareOmpRuntimeConfig({ env: {}, advisorRoster: roster });
+
+    // The staged dir replaces the host agent dir wholesale; without declarative
+    // providers it would strip the host models.yml/auth and break primary
+    // model resolution, so roster-without-providers stays unstaged.
+    expect(prepared.env.PI_CODING_AGENT_DIR).toBeUndefined();
+    expect(prepared.agentConfigDir).toBeNull();
+    expect(prepared.advisorEnabled).toBe(false);
+    expect(prepared.notes).toEqual([
+      "Agent instructions carry a WATCHDOG.yml advisor roster, but PAPERCLIP_OMP_PROVIDERS is unset; the roster is not staged and the advisor stays off. Set PAPERCLIP_OMP_PROVIDERS so the managed agent dir is self-contained.",
+    ]);
+    await prepared.cleanup();
+  });
+
+  it("stages both the roster and models.yml when providers and a roster are set", async () => {
+    const providers = {
+      tensorix: {
+        baseUrl: "http://gw/anthropic",
+        apiKey: "k",
+        api: "anthropic-messages",
+        models: [],
+      },
+    };
+    const prepared = await prepareOmpRuntimeConfig({
+      env: { PAPERCLIP_OMP_PROVIDERS: JSON.stringify(providers) },
+      advisorRoster: "advisors: []\n",
+    });
+    const agentConfigDir = prepared.env.PI_CODING_AGENT_DIR;
+    cleanupPaths.add(agentConfigDir);
+
+    expect(prepared.advisorEnabled).toBe(true);
+    expect((await readModelsYml(agentConfigDir)).providers).toEqual(providers);
+    await expect(
+      fs.readFile(path.join(agentConfigDir, "WATCHDOG.yml"), "utf8"),
+    ).resolves.toBe("advisors: []\n");
+    await prepared.cleanup();
+  });
+
+  it("treats a whitespace-only roster as unset and stages nothing", async () => {
+    const prepared = await prepareOmpRuntimeConfig({ env: {}, advisorRoster: "   \n" });
+    expect(prepared.env.PI_CODING_AGENT_DIR).toBeUndefined();
+    expect(prepared.advisorEnabled).toBe(false);
+    expect(prepared.notes).toEqual([]);
     await prepared.cleanup();
   });
 

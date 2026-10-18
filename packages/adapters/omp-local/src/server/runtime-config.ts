@@ -5,8 +5,10 @@ import path from "node:path";
 type PreparedOmpRuntimeConfig = {
   env: Record<string, string>;
   notes: string[];
-  /** The managed agent-config dir, or null when no provider config was written. */
+  /** The managed agent-config dir, or null when nothing was staged into one. */
   agentConfigDir: string | null;
+  /** Whether a per-agent WATCHDOG.yml advisor roster was staged for this run. */
+  advisorEnabled: boolean;
   cleanup: () => Promise<void>;
 };
 
@@ -88,37 +90,63 @@ function parseProviderConfig(
 }
 
 // Materialize custom OMP providers supplied via PAPERCLIP_OMP_PROVIDERS (a JSON
-// object in OMP's models.yml "providers" shape) into a managed agent-config dir.
+// object in OMP's models.yml "providers" shape), plus the agent's WATCHDOG.yml
+// advisor roster when its instructions bundle carries one, into a managed
+// agent-config dir.
 //
 // OMP has no base-url CLI flag or env var: the only mechanism for pointing it at a
 // custom/OpenAI- or Anthropic-compatible endpoint is a models.yml file in its
 // agent config dir, which OMP resolves from $PI_CODING_AGENT_DIR (falling back to
 // $HOME/.omp/agent). OMP resolves `--provider P --model M` by matching that
 // registry, so routing a gateway model requires the provider entry to enumerate
-// its models explicitly. We accept the providers as config (not hard-coded) so
-// the gateway URL, key, and model list stay declarative.
+// its models explicitly. We accept the providers as config (not hard-coded) so the
+// gateway URL, key, and model list stay declarative.
 //
-// When PAPERCLIP_OMP_PROVIDERS is set we write {"providers": ...} to a fresh temp
-// dir and point PI_CODING_AGENT_DIR at it; the managed dir intentionally replaces
-// the host agent dir (credentials travel inside the providers config itself, via
-// a literal apiKey or a server-side-expanded {env:VAR} placeholder). For remote
-// execution targets, execute.ts ships the dir to the sandbox as a runtime asset
-// and repoints PI_CODING_AGENT_DIR at the in-sandbox copy. JSON is written
-// verbatim to models.yml: OMP's loader reads YAML, and JSON is a valid YAML
-// subset, so no serializer dependency is needed.
+// The advisor roster is per-agent config too: OMP discovers it at
+// <active agent dir>/WATCHDOG.yml (with a .yaml fallback at the same scope), so
+// Paperclip stages the roster file from the agent's instructions bundle into the
+// same managed dir and the run overlay enables the advisor subsystem, so live
+// runs review with exactly this agent's advisors.
+//
+// The staged dir intentionally replaces the host agent dir wholesale, so it must
+// be self-contained: the roster rides the same dir as the declarative providers.
+// A roster without PAPERCLIP_OMP_PROVIDERS cannot be staged, because stripping
+// the host models.yml/auth from a non-providers agent silently breaks its primary
+// model resolution; that case surfaces as a config-gap note instead, and the
+// run keeps today's host-fallback behavior with advisors off. Nothing is ever
+// read from or written to the operator's ~/.omp/agent.
+//
+// When anything is staged we point PI_CODING_AGENT_DIR at a fresh temp dir. For
+// remote execution targets, execute.ts ships the dir to the sandbox as a runtime
+// asset and repoints PI_CODING_AGENT_DIR at the in-sandbox copy, so the roster
+// lands on remote targets through the same asset path as models.yml. JSON is
+// written verbatim to models.yml: OMP's loader reads YAML, and JSON is a valid
+// YAML subset, so no serializer dependency is needed. The roster is written verbatim.
 export async function prepareOmpRuntimeConfig(input: {
   env: Record<string, string>;
+  /** Contents of the agent's WATCHDOG.yml advisor roster, when the instructions bundle carries one. */
+  advisorRoster?: string | null;
 }): Promise<PreparedOmpRuntimeConfig> {
   const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
   const { providers, warning } = parseProviderConfig(
     input.env.PAPERCLIP_OMP_PROVIDERS ?? process.env.PAPERCLIP_OMP_PROVIDERS,
     resolveEnv,
   );
+  const advisorRoster =
+    typeof input.advisorRoster === "string" && input.advisorRoster.trim().length > 0
+      ? input.advisorRoster
+      : null;
   if (!providers) {
     return {
       env: input.env,
-      notes: warning ? [warning] : [],
+      notes: [
+        ...(warning ? [warning] : []),
+        ...(advisorRoster
+          ? ["Agent instructions carry a WATCHDOG.yml advisor roster, but PAPERCLIP_OMP_PROVIDERS is unset; the roster is not staged and the advisor stays off. Set PAPERCLIP_OMP_PROVIDERS so the managed agent dir is self-contained."]
+          : []),
+      ],
       agentConfigDir: null,
+      advisorEnabled: false,
       cleanup: async () => {},
     };
   }
@@ -130,8 +158,11 @@ export async function prepareOmpRuntimeConfig(input: {
       `${JSON.stringify({ providers }, null, 2)}\n`,
       "utf8",
     );
+    if (advisorRoster) {
+      await fs.writeFile(path.join(agentConfigDir, "WATCHDOG.yml"), advisorRoster, "utf8");
+    }
   } catch (err) {
-    // Never leak the temp dir when the write fails (e.g. disk-full): the
+    // Never leak the temp dir when a write fails (e.g. disk-full): the
     // caller only receives the cleanup handle on success.
     await fs.rm(agentConfigDir, { recursive: true, force: true }).catch(() => undefined);
     throw err;
@@ -145,8 +176,12 @@ export async function prepareOmpRuntimeConfig(input: {
     notes: [
       ...(warning ? [warning] : []),
       `Injected ${Object.keys(providers).length} custom OMP provider(s) from PAPERCLIP_OMP_PROVIDERS into a managed models.yml: ${Object.keys(providers).join(", ")}.`,
+      ...(advisorRoster
+        ? ["Staged the agent's WATCHDOG.yml advisor roster into the managed OMP agent dir; the advisor subsystem is enabled for this run."]
+        : []),
     ],
     agentConfigDir,
+    advisorEnabled: advisorRoster !== null,
     cleanup: async () => {
       await fs.rm(agentConfigDir, { recursive: true, force: true });
     },
