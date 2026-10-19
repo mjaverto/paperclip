@@ -108,13 +108,14 @@ function parseProviderConfig(
 // same managed dir and the run overlay enables the advisor subsystem, so live
 // runs review with exactly this agent's advisors.
 //
-// The staged dir intentionally replaces the host agent dir wholesale, so it must
-// be self-contained: the roster rides the same dir as the declarative providers.
-// A roster without PAPERCLIP_OMP_PROVIDERS cannot be staged, because stripping
-// the host models.yml/auth from a non-providers agent silently breaks its primary
-// model resolution; that case surfaces as a config-gap note instead, and the
-// run keeps today's host-fallback behavior with advisors off. Nothing is ever
-// read from or written to the operator's ~/.omp/agent.
+// The staged dir intentionally replaces the host agent dir wholesale, which also
+// hides the operator's OMP logins. A roster can therefore only be staged when the
+// run can authenticate some other way: the OMP auth broker (OMP_AUTH_BROKER_URL,
+// which shares existing logins without copying them) or declarative providers
+// (PAPERCLIP_OMP_PROVIDERS). With neither, staging would silently break the
+// agent's primary model, so the roster stays unstaged, advisors stay off, and the
+// run surfaces a config-gap note. Host config and credentials are never copied
+// into run assets.
 //
 // When anything is staged we point PI_CODING_AGENT_DIR at a fresh temp dir. For
 // remote execution targets, execute.ts ships the dir to the sandbox as a runtime
@@ -136,13 +137,17 @@ export async function prepareOmpRuntimeConfig(input: {
     typeof input.advisorRoster === "string" && input.advisorRoster.trim().length > 0
       ? input.advisorRoster
       : null;
-  if (!providers) {
+  const brokerConfigured = (resolveEnv("OMP_AUTH_BROKER_URL") ?? "").trim().length > 0;
+  // Only stage a roster when the run can authenticate without the host agent dir.
+  const rosterToStage =
+    advisorRoster !== null && (providers !== null || brokerConfigured) ? advisorRoster : null;
+  if (!providers && rosterToStage === null) {
     return {
       env: input.env,
       notes: [
         ...(warning ? [warning] : []),
         ...(advisorRoster
-          ? ["Agent instructions carry a WATCHDOG.yml advisor roster, but PAPERCLIP_OMP_PROVIDERS is unset; the roster is not staged and the advisor stays off. Set PAPERCLIP_OMP_PROVIDERS so the managed agent dir is self-contained."]
+          ? ["Agent instructions carry a WATCHDOG.yml advisor roster, but neither OMP_AUTH_BROKER_URL nor PAPERCLIP_OMP_PROVIDERS is set; the roster is not staged and the advisor stays off. The managed agent dir hides host OMP logins, so run `omp auth-broker serve` and set OMP_AUTH_BROKER_URL, or configure provider credentials."]
           : []),
       ],
       agentConfigDir: null,
@@ -153,13 +158,15 @@ export async function prepareOmpRuntimeConfig(input: {
 
   const agentConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-omp-agent-config-"));
   try {
-    await fs.writeFile(
-      path.join(agentConfigDir, "models.yml"),
-      `${JSON.stringify({ providers }, null, 2)}\n`,
-      "utf8",
-    );
-    if (advisorRoster) {
-      await fs.writeFile(path.join(agentConfigDir, "WATCHDOG.yml"), advisorRoster, "utf8");
+    if (providers) {
+      await fs.writeFile(
+        path.join(agentConfigDir, "models.yml"),
+        `${JSON.stringify({ providers }, null, 2)}\n`,
+        "utf8",
+      );
+    }
+    if (rosterToStage !== null) {
+      await fs.writeFile(path.join(agentConfigDir, "WATCHDOG.yml"), rosterToStage, "utf8");
     }
   } catch (err) {
     // Never leak the temp dir when a write fails (e.g. disk-full): the
@@ -175,13 +182,20 @@ export async function prepareOmpRuntimeConfig(input: {
     },
     notes: [
       ...(warning ? [warning] : []),
-      `Injected ${Object.keys(providers).length} custom OMP provider(s) from PAPERCLIP_OMP_PROVIDERS into a managed models.yml: ${Object.keys(providers).join(", ")}.`,
-      ...(advisorRoster
-        ? ["Staged the agent's WATCHDOG.yml advisor roster into the managed OMP agent dir; the advisor subsystem is enabled for this run."]
+      ...(providers
+        ? [`Injected ${Object.keys(providers).length} custom OMP provider(s) from PAPERCLIP_OMP_PROVIDERS into a managed models.yml: ${Object.keys(providers).join(", ")}.`]
+        : []),
+      ...(rosterToStage !== null
+        ? [
+            "Staged the agent's WATCHDOG.yml advisor roster into the managed OMP agent dir; the advisor subsystem is enabled for this run.",
+            ...(brokerConfigured
+              ? []
+              : ["OMP_AUTH_BROKER_URL is not set: advisor models authenticate only through the declared providers or provider environment keys, not host OMP logins."]),
+          ]
         : []),
     ],
     agentConfigDir,
-    advisorEnabled: advisorRoster !== null,
+    advisorEnabled: rosterToStage !== null,
     cleanup: async () => {
       await fs.rm(agentConfigDir, { recursive: true, force: true });
     },
