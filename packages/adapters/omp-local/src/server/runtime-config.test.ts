@@ -32,20 +32,59 @@ describe("prepareOmpRuntimeConfig", () => {
     await prepared.cleanup();
   });
 
-  it("does not stage a roster without providers and surfaces the config gap", async () => {
-    const roster = "advisors:\n- name: Gate\n  model: example/gate-model\n";
-    const prepared = await prepareOmpRuntimeConfig({ env: {}, advisorRoster: roster });
+  it("stages a roster when only the OMP auth broker is configured", async () => {
+    const roster = "advisors:\n- name: Gate\n  model: anthropic/claude-opus-5-5\n";
+    const env = { OMP_AUTH_BROKER_URL: "http://127.0.0.1:8765" };
+    const prepared = await prepareOmpRuntimeConfig({ env, advisorRoster: roster });
+    const agentConfigDir = prepared.env.PI_CODING_AGENT_DIR;
+    cleanupPaths.add(agentConfigDir);
 
-    // The staged dir replaces the host agent dir wholesale; without declarative
-    // providers it would strip the host models.yml/auth and break primary
-    // model resolution, so roster-without-providers stays unstaged.
-    expect(prepared.env.PI_CODING_AGENT_DIR).toBeUndefined();
-    expect(prepared.agentConfigDir).toBeNull();
-    expect(prepared.advisorEnabled).toBe(false);
-    expect(prepared.notes).toEqual([
-      "Agent instructions carry a WATCHDOG.yml advisor roster, but PAPERCLIP_OMP_PROVIDERS is unset; the roster is not staged and the advisor stays off. Set PAPERCLIP_OMP_PROVIDERS so the managed agent dir is self-contained.",
-    ]);
+    expect(prepared.advisorEnabled).toBe(true);
+    expect(prepared.env.OMP_AUTH_BROKER_URL).toBe(env.OMP_AUTH_BROKER_URL);
+    await expect(fs.readFile(path.join(agentConfigDir, "WATCHDOG.yml"), "utf8")).resolves.toBe(roster);
+    // Native model auth stays in the broker, not in the portable run assets.
+    expect(await fs.readdir(agentConfigDir)).toEqual(["WATCHDOG.yml"]);
     await prepared.cleanup();
+    await expect(fs.access(agentConfigDir)).rejects.toThrow();
+  });
+
+  it("does not stage a roster without a broker or providers and surfaces the config gap", async () => {
+    const previousBroker = process.env.OMP_AUTH_BROKER_URL;
+    delete process.env.OMP_AUTH_BROKER_URL;
+    try {
+      const roster = "advisors:\n- name: Gate\n  model: example/gate-model\n";
+      const prepared = await prepareOmpRuntimeConfig({ env: {}, advisorRoster: roster });
+
+      // The staged dir replaces the host agent dir wholesale and hides host OMP
+      // logins; without a broker or providers it would break the primary model.
+      expect(prepared.env.PI_CODING_AGENT_DIR).toBeUndefined();
+      expect(prepared.agentConfigDir).toBeNull();
+      expect(prepared.advisorEnabled).toBe(false);
+      expect(prepared.notes).toHaveLength(1);
+      expect(prepared.notes[0]).toContain("neither OMP_AUTH_BROKER_URL nor PAPERCLIP_OMP_PROVIDERS is set");
+      await prepared.cleanup();
+    } finally {
+      if (previousBroker !== undefined) process.env.OMP_AUTH_BROKER_URL = previousBroker;
+    }
+  });
+
+  it("warns that advisor models need credentials when staging with providers but no broker", async () => {
+    const previousBroker = process.env.OMP_AUTH_BROKER_URL;
+    delete process.env.OMP_AUTH_BROKER_URL;
+    try {
+      const providers = { tensorix: { baseUrl: "http://gw/anthropic", apiKey: "k", api: "anthropic-messages", models: [] } };
+      const prepared = await prepareOmpRuntimeConfig({
+        env: { PAPERCLIP_OMP_PROVIDERS: JSON.stringify(providers) },
+        advisorRoster: "advisors: []\n",
+      });
+      cleanupPaths.add(prepared.env.PI_CODING_AGENT_DIR);
+
+      expect(prepared.advisorEnabled).toBe(true);
+      expect(prepared.notes.some((n) => n.includes("OMP_AUTH_BROKER_URL is not set"))).toBe(true);
+      await prepared.cleanup();
+    } finally {
+      if (previousBroker !== undefined) process.env.OMP_AUTH_BROKER_URL = previousBroker;
+    }
   });
 
   it("stages both the roster and models.yml when providers and a roster are set", async () => {

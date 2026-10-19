@@ -47,10 +47,23 @@ Advisor roster:
   different advisors. The run overlay enables the advisor subsystem only when a
   roster was staged; agents without a roster keep advisors off and never start the
   operator's own advisor models.
-- The roster requires PAPERCLIP_OMP_PROVIDERS (declarative providers): the staged
-  agent dir replaces the host agent dir wholesale, so it must be self-contained. With
-  a roster but no providers config the roster is not staged and the run surfaces a
-  config-gap note instead.
+- A roster is staged only when the run can authenticate without the host agent dir,
+  which the staged dir replaces: set OMP_AUTH_BROKER_URL (recommended; shares existing
+  OMP logins without copying them) or PAPERCLIP_OMP_PROVIDERS (declarative custom
+  providers). With neither, the roster is not staged, advisors stay off, and the run
+  surfaces a config-gap note. Host config and credentials are never copied.
+- To reuse existing OMP subscription logins locally, run \`omp auth-broker serve\`
+  on the Paperclip host (keep it running, for example as a systemd user service; runs
+  cannot authenticate while it is down) and set \`OMP_AUTH_BROKER_URL=http://127.0.0.1:8765\`
+  in the Paperclip server environment or the agent's env. OMP reads the broker token
+  from its normal config root; no separate provider API keys are needed.
+- For example, use \`anthropic/claude-sonnet-5-5\` as the primary model, with
+  \`anthropic/claude-opus-5-5:max\` and \`openai-codex/gpt-6.1-sol\` in WATCHDOG.yml.
+  The Codex provider uses the existing ChatGPT/Codex login; \`openai/...\` requires
+  an OpenAI API key instead.
+- Remote execution targets need a reachable broker URL and an explicitly supplied
+  OMP_AUTH_BROKER_TOKEN, or their own provider credentials. Host logins are never
+  copied into remote assets, and a loopback broker URL is local-host only.
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds
@@ -81,5 +94,5 @@ Notes:
 - Custom/OpenAI-compatible endpoints are supported via PAPERCLIP_OMP_PROVIDERS (same providers JSON shape as pi, materialized into a managed models.yml pointed at by PI_CODING_AGENT_DIR, which OMP honors).
 - A WATCHDOG.yml sibling of the entry instructions file is the per-agent advisor
   roster (see "Advisor roster" above); reviewers run with the agent each heartbeat
-  when PAPERCLIP_OMP_PROVIDERS is also configured.
+  using the configured broker or provider credentials.
 `;
