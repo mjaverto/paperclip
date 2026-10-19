@@ -11,6 +11,13 @@
   dir hides host logins. Document Sonnet with Opus and Codex-backed GPT advisors
   and the difference between the Codex login (`openai-codex/...`) and OpenAI
   API-key (`openai/...`) selectors.
+- Stop handing the server's own Paperclip-internal environment to agent processes.
+  `omp_local` merged the raw server `process.env` into the env it passed to the
+  runner, which defeated the runner's inherited-env filter, so any agent that ran
+  `env` could read `PAPERCLIP_AGENT_JWT_SECRET` (which signs every agent's token)
+  plus the server's psql/pg_dump paths. The merge now starts from
+  `sanitizeInheritedPaperclipEnv(process.env)`; per-run Paperclip variables and the
+  agent's own configured env are unchanged and still win.
 
 ## 0.1.0
 

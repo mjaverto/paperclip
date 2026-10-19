@@ -41,6 +41,7 @@ import {
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
   ensurePathInEnv,
+  sanitizeInheritedPaperclipEnv,
   refreshPaperclipWorkspaceEnvForExecution,
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
@@ -518,7 +519,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const skillBinDirs = ompSkillEntries
       .filter((entry) => stagedSkillKeys.has(entry.key) && entry.source.length > 0)
       .map((entry) => path.join(entry.source, "bin"));
-    const mergedEnv = ensurePathInEnv({ ...process.env, ...env });
+    // Agents inherit the server's environment minus the server's own Paperclip-internal values
+    // (signing secret, DB tool paths). runChildProcess applies this same filter to what it
+    // inherits itself, but the env handed to it below already carries the ambient values, so
+    // the filter has to be applied here too.
+    const inheritedEnv = sanitizeInheritedPaperclipEnv(process.env);
+    const mergedEnv = ensurePathInEnv({ ...inheritedEnv, ...env });
     const pathKey =
       typeof mergedEnv.Path === "string" && mergedEnv.Path.length > 0 && !mergedEnv.PATH
         ? "Path"
@@ -658,7 +664,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         Object.assign(env, paperclipBridge.env);
         loggedEnv = buildInvocationEnvForLogs(env, {
           runtimeEnv: Object.fromEntries(
-            Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+            Object.entries(ensurePathInEnv({ ...inheritedEnv, ...env })).filter(
               (entry): entry is [string, string] => typeof entry[1] === "string",
             ),
           ),
