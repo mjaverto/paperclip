@@ -492,9 +492,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // revisioned with the rest of the bundle. Stage it into the managed agent
   // dir so live runs review with exactly this agent's advisors; agents without
   // a roster keep today's behavior (advisor off, host agent dir untouched).
-  // Resolved before runtimeEnv is computed so local validation and the
-  // spawned OMP process see the same managed dir PAPERCLIP_OMP_PROVIDERS
-  // produces, and remote targets ship it through the same runtime asset.
+  // Resolve before runtimeEnv is computed so local validation and execution see
+  // the same managed roster; remote targets ship it through the runtime asset.
   const configuredInstructionsFilePath = asString(config.instructionsFilePath, "").trim();
   const instructionsBundleDir = configuredInstructionsFilePath
     ? path.dirname(path.resolve(cwd, configuredInstructionsFilePath))
