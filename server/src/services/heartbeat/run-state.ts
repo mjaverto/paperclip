@@ -129,6 +129,9 @@ const heartbeatRunSummaryListColumns = {
   processPid: sql<number | null>`NULL`.as("processPid"),
   processGroupId: sql<number | null>`NULL`.as("processGroupId"),
   resultJson: sql<Record<string, unknown> | null>`NULL`.as("resultJson"),
+  // Summary rows never read result_json: cost extraction would detoast the whole
+  // column per row, and no summary consumer reads costUsd.
+  costUsd: sql<number | null>`NULL`.as("costUsd"),
 } as const;
 
 const heartbeatRunListContextRecord = sql`lateral jsonb_to_record(
@@ -136,7 +139,7 @@ const heartbeatRunListContextRecord = sql`lateral jsonb_to_record(
     then ${heartbeatRuns.contextSnapshot} else '{}'::jsonb end
 ) as run_context("issueId" text, "taskId" text, "taskKey" text,
   "commentId" text, "wakeCommentId" text, "wakeReason" text,
-  "wakeSource" text, "wakeTriggerDetail" text)`;
+  "wakeSource" text, "wakeTriggerDetail" text, "paperclipSecretRedactions" jsonb)`;
 
 const heartbeatRunListContextColumns = {
   contextIssueId: sql<string | null>`coalesce(
@@ -150,6 +153,8 @@ const heartbeatRunListContextColumns = {
   contextWakeReason: sql<string | null>`run_context."wakeReason"`.as("contextWakeReason"),
   contextWakeSource: sql<string | null>`run_context."wakeSource"`.as("contextWakeSource"),
   contextWakeTriggerDetail: sql<string | null>`run_context."wakeTriggerDetail"`.as("contextWakeTriggerDetail"),
+  // Read from the same context parse so redaction needs no second context_snapshot query.
+  contextSecretRedactions: sql<unknown>`run_context."paperclipSecretRedactions"`.as("contextSecretRedactions"),
 } as const;
 
 const heartbeatRunListResultColumns = {
@@ -422,6 +427,15 @@ export function summarizeHeartbeatRunContextSnapshot(
   }
 
   return Object.keys(summary).length > 0 ? summary : null;
+}
+
+/** Re-attaches the run's secret-redaction registry so list redaction can reuse the list query's context parse. */
+function withSecretRedactionRegistry(
+  contextSnapshot: Record<string, unknown> | null,
+  registry: unknown,
+): Record<string, unknown> | null {
+  if (!Array.isArray(registry) || registry.length === 0) return contextSnapshot;
+  return { ...(contextSnapshot ?? {}), paperclipSecretRedactions: registry };
 }
 
 export function summarizeHeartbeatRunListResultJson(input: {
@@ -1705,7 +1719,7 @@ export function createHeartbeatRunState(db: Db) {
       companyId: string,
       agentId?: string,
       limit?: number,
-      options: { summary?: boolean } = {},
+      options: { summary?: boolean; includeSecretRedactionRegistry?: boolean } = {},
     ) => {
       const safeForLegacyEncoding = await hasUnsafeTextProjectionDatabase();
       const summary = options.summary === true;
@@ -1756,6 +1770,7 @@ export function createHeartbeatRunState(db: Db) {
           contextWakeReason,
           contextWakeSource,
           contextWakeTriggerDetail,
+          contextSecretRedactions,
           resultSummary,
           resultResult,
           resultMessage,
@@ -1776,7 +1791,7 @@ export function createHeartbeatRunState(db: Db) {
 
         return {
           ...rest,
-          contextSnapshot: summarizeHeartbeatRunContextSnapshot({
+          contextSnapshot: withSecretRedactionRegistry(summarizeHeartbeatRunContextSnapshot({
             issueId: contextIssueId,
             taskId: contextTaskId,
             taskKey: contextTaskKey,
@@ -1785,7 +1800,7 @@ export function createHeartbeatRunState(db: Db) {
             wakeReason: contextWakeReason,
             wakeSource: contextWakeSource,
             wakeTriggerDetail: contextWakeTriggerDetail,
-          }),
+          }), options.includeSecretRedactionRegistry === true ? contextSecretRedactions : undefined),
           resultJson:
             safeForLegacyEncoding || summary
               ? null

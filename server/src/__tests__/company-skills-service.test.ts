@@ -688,10 +688,87 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       .set({ updatedAt: preservedUpdatedAt })
       .where(eq(companySkills.id, bundledSkill.id));
 
-    const refreshedList = await svc.list(companyId, { sort: "recent" });
+    // The direct DB edit bypasses the service: lapse the list freshness TTL so
+    // this list actually runs the refresh under test.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61_000);
+    let refreshedList: Awaited<ReturnType<typeof svc.list>>;
+    try {
+      refreshedList = await svc.list(companyId, { sort: "recent" });
+    } finally {
+      vi.useRealTimers();
+    }
     const refreshedSkill = refreshedList.find((skill) => skill.id === bundledSkill.id);
 
     expect(refreshedSkill?.updatedAt.toISOString()).toBe(preservedUpdatedAt.toISOString());
+  });
+
+  describe("list inventory freshness stamp", () => {
+    async function unfileBundledSkill(companyId: string) {
+      const listed = await svc.list(companyId); // refreshes and records the stamp
+      const bundled = listed.find((skill) => skill.key.startsWith("paperclipai/paperclip/") && skill.folderId);
+      if (!bundled) throw new Error("Expected a filed bundled skill");
+      await db.update(companySkills).set({ folderId: null }).where(eq(companySkills.id, bundled.id));
+      // Still inside the TTL, so a plain list serves the unrepaired row.
+      expect((await svc.list(companyId)).find((skill) => skill.id === bundled.id)?.folderId ?? null).toBeNull();
+      return bundled.id;
+    }
+
+    async function createCompanyRow() {
+      const companyId = randomUUID();
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      return companyId;
+    }
+
+    async function listedFolderId(companyId: string, skillId: string) {
+      return (await svc.list(companyId)).find((skill) => skill.id === skillId)?.folderId ?? null;
+    }
+
+    it("clears the stamp after createLocalSkill so the next list refreshes", async () => {
+      const companyId = await createCompanyRow();
+      const bundledId = await unfileBundledSkill(companyId);
+      await svc.createLocalSkill(companyId, { name: "Stamp create", slug: "stamp-create" });
+      expect(await listedFolderId(companyId, bundledId)).toEqual(expect.any(String));
+    });
+
+    it("clears the stamp after deleteSkill so the next list refreshes", async () => {
+      const companyId = await createCompanyRow();
+      const local = await svc.createLocalSkill(companyId, { name: "Stamp delete", slug: "stamp-delete" });
+      const bundledId = await unfileBundledSkill(companyId);
+      await svc.deleteSkill(companyId, local.id);
+      expect(await listedFolderId(companyId, bundledId)).toEqual(expect.any(String));
+    });
+
+    it("clears the stamp after deleteSkills so the next list refreshes", async () => {
+      const companyId = await createCompanyRow();
+      const local = await svc.createLocalSkill(companyId, { name: "Stamp bulk", slug: "stamp-bulk" });
+      const bundledId = await unfileBundledSkill(companyId);
+      await svc.deleteSkills(companyId, [local.id]);
+      expect(await listedFolderId(companyId, bundledId)).toEqual(expect.any(String));
+    });
+
+    it("clears the stamp after a mutator inventory refresh", async () => {
+      const companyId = await createCompanyRow();
+      const local = await svc.createLocalSkill(companyId, { name: "Stamp mutator", slug: "stamp-mutator" });
+      const bundledId = await unfileBundledSkill(companyId);
+      // updateFile refreshes with no cache option, which must drop the stamp.
+      await svc.updateFile(companyId, local.id, "SKILL.md", "# changed\n").catch(() => null);
+      expect(await listedFolderId(companyId, bundledId)).toEqual(expect.any(String));
+    });
+
+    it("keeps the stamp across read-only detail reads", async () => {
+      const companyId = await createCompanyRow();
+      const local = await svc.createLocalSkill(companyId, { name: "Stamp detail", slug: "stamp-detail" });
+      const bundledId = await unfileBundledSkill(companyId);
+      await svc.detail(companyId, local.id);
+      await svc.readFile(companyId, local.id, "SKILL.md");
+      expect((await svc.list(companyId)).find((skill) => skill.id === bundledId)?.folderId ?? null).toBeNull();
+    });
   });
 
   it("makes the onboarding skill resolvable and available to agent runtimes", async () => {

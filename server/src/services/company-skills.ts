@@ -3254,7 +3254,11 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     // Denied reads must not perform the lazy bundled-skill reconciliation.
     if (!visibility().canReadCompany(companyId)) return;
     const refreshedAt = skillInventoryRefreshedAt.get(companyId);
-    if (options.cache === "reuse" && refreshedAt !== undefined && Date.now() - refreshedAt < SKILL_INVENTORY_FRESH_TTL_MS) return;
+    if (options.cache === "reuse" && refreshedAt !== undefined) {
+      // A wall clock that stepped backwards yields a negative age: treat it as stale.
+      const age = Date.now() - refreshedAt;
+      if (age >= 0 && age < SKILL_INVENTORY_FRESH_TTL_MS) return;
+    }
     const existingRefresh = skillInventoryRefreshPromises.get(companyId);
     if (existingRefresh) {
       await existingRefresh;
@@ -3345,7 +3349,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
         ? await folderSvc.descendantIds(companyId, "skill", query.folderId)
         : new Set([query.folderId]);
     }
-    const agentRows = await agents.list(companyId);
+    const agentRows = await agents.list(companyId, { includeSpend: false });
     const q = query.q?.trim().toLowerCase() ?? "";
     const categories = new Set(
       (query.categories ?? [])
@@ -3371,11 +3375,15 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
       }
       return true;
     });
+    // Resolve each agent's desired keys once, then count per key.
+    const attachedAgentCounts = new Map<string, number>();
+    for (const agent of agentRows) {
+      for (const key of resolveDesiredSkillKeys(rows, agent.adapterConfig as Record<string, unknown>)) {
+        attachedAgentCounts.set(key, (attachedAgentCounts.get(key) ?? 0) + 1);
+      }
+    }
     const items = filtered.map((skill) => {
-      const attachedAgentCount = agentRows.filter((agent) => {
-        const desiredSkills = resolveDesiredSkillKeys(rows, agent.adapterConfig as Record<string, unknown>);
-        return desiredSkills.includes(skill.key);
-      }).length;
+      const attachedAgentCount = attachedAgentCounts.get(skill.key) ?? 0;
       return toCompanySkillListItem(skill, attachedAgentCount);
     });
     const sort = query.sort ?? "alphabetical";
@@ -3626,7 +3634,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
   }
 
   async function detail(companyId: string, id: string, actor?: SkillActor | null): Promise<CompanySkillDetail | null> {
-    await ensureSkillInventoryCurrent(companyId);
+    await ensureSkillInventoryCurrent(companyId, { cache: "reuse" });
     const skill = await getByRouteRef(companyId, id);
     if (!skill) return null;
     const usedByAgents = await usage(companyId, skill.key);
@@ -3649,7 +3657,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     skillId: string,
     actor?: SkillActor | null,
   ): Promise<CompanySkillForkPrecheckResult | null> {
-    await ensureSkillInventoryCurrent(companyId);
+    await ensureSkillInventoryCurrent(companyId, { cache: "reuse" });
     const skill = await getById(companyId, skillId);
     if (!skill) return null;
     const usedByAgents = await usage(companyId, skill.key);
@@ -4307,7 +4315,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
   }
 
   async function updateStatus(companyId: string, skillId: string): Promise<CompanySkillUpdateStatus | null> {
-    await ensureSkillInventoryCurrent(companyId);
+    await ensureSkillInventoryCurrent(companyId, { cache: "reuse" });
     const skill = await getById(companyId, skillId);
     if (!skill) return null;
     const audit = skill.sourceType === "catalog" || skill.sourceType === "local_path"
@@ -4411,7 +4419,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
   }
 
   async function readFile(companyId: string, skillId: string, relativePath: string): Promise<CompanySkillFileDetail | null> {
-    await ensureSkillInventoryCurrent(companyId);
+    await ensureSkillInventoryCurrent(companyId, { cache: "reuse" });
     const skill = await getById(companyId, skillId);
     if (!skill) return null;
 

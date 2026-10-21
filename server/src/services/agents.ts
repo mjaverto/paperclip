@@ -30,7 +30,8 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   const updateAgent = (...args: Parameters<ReturnType<typeof createAgentLifecycle>["updateConfiguration"]>) =>
     createAgentLifecycle(db, budgetHooks).updateConfiguration(...args);
   return {
-    list: async (companyId: string, options?: { includeTerminated?: boolean }) => {
+    /** `includeSpend: false` skips the monthly spend aggregation for callers that only read configs. */
+    list: async (companyId: string, options?: { includeTerminated?: boolean; includeSpend?: boolean }) => {
       const conditions = [eq(agents.companyId, companyId)];
       if (!options?.includeTerminated) {
         conditions.push(ne(agents.status, "terminated"));
@@ -39,7 +40,7 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         db.select().from(agents).where(and(...conditions)),
         listCompanyAgentRows(companyId),
       ]);
-      const hydrated = await hydrateAgentSpend(rows);
+      const hydrated = options?.includeSpend === false ? rows : await hydrateAgentSpend(rows);
       return normalizeAgentRows(hydrated, allCompanyRows);
     },
 
