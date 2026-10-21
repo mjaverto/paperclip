@@ -5,8 +5,14 @@ import { connectionGrants, connectionGrantMembers, heartbeatRuns } from "@paperc
  * Callers obtain viewer identity from authentication, never request parameters.
  * The grant reference stays in storage and never enters the response. */
 export function credentialAccessConnectionNameSql(viewerUserId: string | null) {
-  return sql<string | null>`case when jsonb_typeof(${heartbeatRuns.resultJson} #> '{configurationIncomplete,credentialAccess,connectionName}') = 'string'
-  and ${viewerUserId}::text is not null
+  // No viewer can never see a name: skip the result_json read entirely.
+  if (viewerUserId == null) return sql<string | null>`null::text`;
+  // Cheap row-level tests come first so most rows never detoast result_json.
+  // Only a failed `configuration_incomplete` run carries credentialAccess.
+  // The nested CASE guarantees the cheap test runs first; AND evaluation order is not specified.
+  return sql<string | null>`case when ${heartbeatRuns.status} = 'failed'
+  and ${heartbeatRuns.errorCode} = 'configuration_incomplete'
+  then case when jsonb_typeof(${heartbeatRuns.resultJson} #> '{configurationIncomplete,credentialAccess,connectionName}') = 'string'
   and (${heartbeatRuns.responsibleUserId} = ${viewerUserId}
     or exists (
       select 1 from ${connectionGrants}
@@ -24,5 +30,6 @@ export function credentialAccessConnectionNameSql(viewerUserId: string | null) {
                 and ${connectionGrantMembers.subjectId} = ${viewerUserId})
           )))
     ))
-  then left(${heartbeatRuns.resultJson} #>> '{configurationIncomplete,credentialAccess,connectionName}', 240) end`;
+  then left(${heartbeatRuns.resultJson} #>> '{configurationIncomplete,credentialAccess,connectionName}', 240) end
+  end`;
 }

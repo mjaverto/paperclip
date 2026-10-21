@@ -286,7 +286,7 @@ describe("agent live run routes", () => {
     const response = await requestApp(app, baseUrl => request(baseUrl).get(`/api/companies/company-1/heartbeat-runs${query}`));
     expect(response.status).toBe(200);
     expect(mockHeartbeatService.list).toHaveBeenCalledWith("company-1", query.includes("agentId") ? "agent-1" : undefined,
-      limit, { summary: query.includes("summary=true") });
+      limit, { summary: query.includes("summary=true"), includeSecretRedactionRegistry: true });
     expect(mockRunSecretRedactionRegistry.redactForRuns).toHaveBeenCalled();
   });
   beforeEach(() => {

@@ -16,6 +16,13 @@ type RegistryEntry = {
   material: StoredSecretVersionMaterial;
 };
 
+export type RedactForRunsOptions = {
+  /** When false, the credential connection name is never computed (list routes never emit it). */
+  includeCredentialName?: boolean;
+  /** Per-run `paperclipSecretRedactions` already loaded by the caller; skips the registry query. */
+  registryByRunId?: ReadonlyMap<string, unknown>;
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -121,11 +128,32 @@ export function createRunSecretRedactionRegistry(db: Db) {
           .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId)));
       });
     },
-    redactForRuns: async <T extends { id: string }>(companyId: string, runs: T[], viewerUserId: string | null = null): Promise<T[]> => {
+    redactForRuns: async <T extends { id: string }>(
+      companyId: string,
+      runs: T[],
+      viewerUserId: string | null = null,
+      options: RedactForRunsOptions = {},
+    ): Promise<T[]> => {
       if (runs.length === 0) return [];
-      const rows = await db.select({ id: heartbeatRuns.id, contextSnapshot: registrySnapshot, credentialConnectionName: credentialAccessConnectionNameSql(viewerUserId) })
-        .from(heartbeatRuns)
-        .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.id, runs.map((run) => run.id))));
+      // List routes never emit credentialAccess, so they skip the connection-name
+      // computation. A caller that already read each run's registry (from the list
+      // query's own context parse) passes it in and no second query runs.
+      const rows: Array<{ id: string; contextSnapshot: unknown; credentialConnectionName: string | null }> =
+        options.registryByRunId
+          ? runs.map((run) => ({
+            id: run.id,
+            contextSnapshot: { [REGISTRY_KEY]: options.registryByRunId?.get(run.id) },
+            credentialConnectionName: null,
+          }))
+          : await db.select({
+            id: heartbeatRuns.id,
+            contextSnapshot: registrySnapshot,
+            credentialConnectionName: options.includeCredentialName === false
+              ? sql<string | null>`null::text`
+              : credentialAccessConnectionNameSql(viewerUserId),
+          })
+            .from(heartbeatRuns)
+            .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.id, runs.map((run) => run.id))));
       // Resolve each encrypted value once per request, but apply only each run's
       // own registry. Do not retain plaintext secrets across requests.
       const resolved = new Map<string, Promise<string>>();

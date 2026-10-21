@@ -204,7 +204,15 @@ describeEmbeddedPostgres("companySkillService.installFromCatalog", () => {
       .set({ folderId: null })
       .where(eq(companySkills.id, installed.skill.id));
 
-    const listed = await svc.list(companyId);
+    // Direct DB edits bypass the service, so let the list-read freshness TTL lapse.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61_000);
+    let listed: Awaited<ReturnType<typeof svc.list>>;
+    try {
+      listed = await svc.list(companyId);
+    } finally {
+      vi.useRealTimers();
+    }
     const repaired = listed.find((skill) => skill.id === installed.skill.id);
     const folder = repaired?.folderId
       ? await db.select().from(folders).where(eq(folders.id, repaired.folderId)).then((rows) => rows[0])
@@ -215,6 +223,26 @@ describeEmbeddedPostgres("companySkillService.installFromCatalog", () => {
       name: "Software Development",
       systemKey: "bundled:software-development",
     });
+  });
+
+  it("reuses a recent inventory refresh for list reads until the TTL lapses", async () => {
+    const companyId = await createCompany();
+    const installed = await svc.installFromCatalog(companyId, { catalogSkillId: sampleCatalogSkill.id });
+    // installFromCatalog is a mutator, so this first read refreshes and records.
+    await svc.list(companyId);
+    await db.update(companySkills).set({ folderId: null }).where(eq(companySkills.id, installed.skill.id));
+
+    const cached = (await svc.list(companyId)).find((skill) => skill.id === installed.skill.id);
+    expect(cached?.folderId ?? null).toBeNull();
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 61_000);
+      const refreshed = (await svc.list(companyId)).find((skill) => skill.id === installed.skill.id);
+      expect(refreshed?.folderId).toEqual(expect.any(String));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("materializes catalog asset files without UTF-8 rewriting", async () => {

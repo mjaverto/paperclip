@@ -95,6 +95,14 @@ describe("heartbeat list connection recovery", () => {
       expect(attempt.limit).toBe(options.limit ?? 200);
       expect(attempt.order).toEqual(['"heartbeat_runs"."created_at" desc']);
       expect("resultSummary" in attempt.fields).toBe(!options.summary && options.encoding === "UTF8");
+      if (options.summary) {
+        // Summary rows must not detoast result_json, not even for cost extraction.
+        const sqlOf = (field: unknown) => dialect.sqlToQuery((field as { getSQL(): SQL }).getSQL()).sql;
+        expect(sqlOf(attempt.fields.costUsd)).not.toContain("result_json");
+        expect(sqlOf(attempt.fields.costUsd)).toContain("usage_json");
+        expect(sqlOf(attempt.fields.resultJson)).not.toContain("result_json");
+      }
+      expect("contextSecretRedactions" in attempt.fields).toBe(true);
       expect(attempt.fields).toEqual(test.attempts[0].fields);
     }
   });

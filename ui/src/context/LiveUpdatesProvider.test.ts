@@ -10,10 +10,19 @@ vi.mock("../api/issues", () => ({
   },
 }));
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import { __liveUpdatesTestUtils } from "./LiveUpdatesProvider";
 import { queryKeys } from "../lib/queryKeys";
+
+// Heartbeat invalidations are coalesced in module state behind a real timer; drain
+// whatever a test left pending so it cannot leak a timer or a stale query client.
+afterEach(() => {
+  const noopClient = { invalidateQueries: () => undefined };
+  for (const companyId of ["company-1", "company-9"]) {
+    __liveUpdatesTestUtils.flushHeartbeatInvalidations(noopClient as never, companyId);
+  }
+});
 
 describe("LiveUpdatesProvider issue invalidation", () => {
   it('refreshes sources, legacy repositories and installed skills after a background import', () => {
@@ -266,6 +275,40 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(invalidations).toContainEqual({
       queryKey: queryKeys.runDetail("run-1"),
     });
+  });
+
+  it("coalesces company-wide heartbeat invalidations into one trailing refetch", () => {
+    vi.useFakeTimers();
+    try {
+      const invalidations: Array<{ queryKey: unknown }> = [];
+      const queryClient = {
+        invalidateQueries: (input: { queryKey: unknown }) => {
+          invalidations.push(input);
+        },
+      };
+      for (const agentId of ["agent-1", "agent-2", "agent-1"]) {
+        __liveUpdatesTestUtils.invalidateHeartbeatQueries(queryClient as never, "company-9", { agentId, runId: `run-${agentId}` });
+      }
+      const keyCount = (queryKey: unknown) =>
+        invalidations.filter((entry) => JSON.stringify(entry.queryKey) === JSON.stringify(queryKey)).length;
+      expect(keyCount(queryKeys.heartbeats("company-9"))).toBe(0);
+      expect(keyCount(queryKeys.agents.detail("agent-1"))).toBe(2);
+      // The per-agent run list is invalidated immediately, not coalesced.
+      expect(keyCount(queryKeys.heartbeats("company-9", "agent-1"))).toBe(2);
+      expect(keyCount(queryKeys.heartbeats("company-9", "agent-2"))).toBe(1);
+      vi.advanceTimersByTime(5_000);
+      expect(keyCount(queryKeys.heartbeats("company-9"))).toBe(1);
+      expect(keyCount(queryKeys.agents.list("company-9"))).toBe(1);
+      expect(keyCount(queryKeys.dashboard("company-9"))).toBe(1);
+      expect(keyCount(queryKeys.sidebarBadges("company-9"))).toBe(1);
+      expect(keyCount(["costs", "company-9"])).toBe(1);
+      expect(keyCount(queryKeys.heartbeats("company-9", "agent-1"))).toBe(2);
+      expect(keyCount(queryKeys.heartbeats("company-9", "agent-2"))).toBe(1);
+      vi.advanceTimersByTime(60_000);
+      expect(keyCount(queryKeys.heartbeats("company-9"))).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("applies heartbeat progress payloads directly to cached visible issue runs", () => {
