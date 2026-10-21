@@ -130,8 +130,13 @@ const heartbeatRunSummaryListColumns = {
   processGroupId: sql<number | null>`NULL`.as("processGroupId"),
   resultJson: sql<Record<string, unknown> | null>`NULL`.as("resultJson"),
   // Summary rows never read result_json: cost extraction would detoast the whole
-  // column per row, and no summary consumer reads costUsd.
-  costUsd: sql<number | null>`NULL`.as("costUsd"),
+  // column per row. usage_json is small, already read for the token columns, and
+  // carries the same cost whenever the adapter reported one.
+  costUsd: sql<number | null>`coalesce(
+    (${heartbeatRuns.usageJson} ->> 'costUsd')::numeric,
+    (${heartbeatRuns.usageJson} ->> 'cost_usd')::numeric,
+    (${heartbeatRuns.usageJson} ->> 'total_cost_usd')::numeric
+  )`.as("costUsd"),
 } as const;
 
 const heartbeatRunListContextRecord = sql`lateral jsonb_to_record(
