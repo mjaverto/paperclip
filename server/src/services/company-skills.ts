@@ -385,6 +385,8 @@ type RuntimeSkillEntryOptions = {
   includeLegacy?: boolean;
   onlyKeys?: Set<string>;
   snapshotLatest?: boolean;
+  /** Hot read paths (skill sync) may reuse a recent inventory refresh. */
+  allowCachedInventory?: boolean;
 };
 
 type SkillActor = {
@@ -425,6 +427,10 @@ type RuntimeSkillSourceResolution =
   | { status: "missing"; source: string; detail: string };
 
 const skillInventoryRefreshPromises = new Map<string, Promise<void>>();
+// The refresh scans the disk and upserts bundled/local skills; run it at most
+// once per TTL per company unless a mutating caller forces it.
+const SKILL_INVENTORY_FRESH_TTL_MS = 60_000;
+const skillInventoryRefreshedAt = new Map<string, number>();
 
 function selectCompanySkillColumns() {
   return {
@@ -3239,9 +3245,16 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     }
   }
 
-  async function ensureSkillInventoryCurrent(companyId: string) {
+  /** Reconciles bundled/local skills with disk. Cache modes:
+   * - "reuse": skip when a refresh finished within the TTL (hot read paths).
+   * - "record": always refresh, then remember it as fresh (read-only callers).
+   * - omitted (mutators): always refresh and invalidate, since the caller is
+   *   about to change inventory. */
+  async function ensureSkillInventoryCurrent(companyId: string, options: { cache?: "reuse" | "record" } = {}) {
     // Denied reads must not perform the lazy bundled-skill reconciliation.
     if (!visibility().canReadCompany(companyId)) return;
+    const refreshedAt = skillInventoryRefreshedAt.get(companyId);
+    if (options.cache === "reuse" && refreshedAt !== undefined && Date.now() - refreshedAt < SKILL_INVENTORY_FRESH_TTL_MS) return;
     const existingRefresh = skillInventoryRefreshPromises.get(companyId);
     if (existingRefresh) {
       await existingRefresh;
@@ -3266,6 +3279,10 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     skillInventoryRefreshPromises.set(companyId, refreshPromise);
     try {
       await refreshPromise;
+      // Mutating callers change inventory right after refreshing, so they
+      // must leave the next cached read to refresh again.
+      if (options.cache) skillInventoryRefreshedAt.set(companyId, Date.now());
+      else skillInventoryRefreshedAt.delete(companyId);
     } finally {
       if (skillInventoryRefreshPromises.get(companyId) === refreshPromise) {
         skillInventoryRefreshPromises.delete(companyId);
@@ -3275,7 +3292,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
 
   async function list(companyId: string, query: CompanySkillListQuery = {}): Promise<CompanySkillListItem[]> {
     if (!visibility().canReadCompany(companyId)) return [];
-    await ensureSkillInventoryCurrent(companyId);
+    await ensureSkillInventoryCurrent(companyId, { cache: "reuse" });
     const [dbRows, folderListing] = await Promise.all([db
       .select({
         id: companySkills.id,
@@ -3382,7 +3399,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
 
   async function listFull(companyId: string): Promise<CompanySkill[]> {
     if (!visibility().canReadCompany(companyId)) return [];
-    await ensureSkillInventoryCurrent(companyId);
+    await ensureSkillInventoryCurrent(companyId, { cache: "reuse" });
     return readFullSkillRows(companyId);
   }
 
@@ -6167,7 +6184,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
   ): Promise<T> {
     if (options.onlyKeys?.size === 0 || (!options.onlyKeys && options.selectionConfig && !options.includeLegacy
       && readPaperclipSkillSyncPreference(options.selectionConfig).desiredSkills.length === 0)) return consume([]);
-    await ensureSkillInventoryCurrent(companyId);
+    await ensureSkillInventoryCurrent(companyId, { cache: options.allowCachedInventory ? "reuse" : "record" });
     return withSkillVersionCacheLock(db, companyId, async () => consume(await listRuntimeSkillEntriesLocked(companyId, options)));
   }
 
@@ -7427,9 +7444,15 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     updateSkill,
     updateFile,
     deleteFile,
-    createLocalSkill,
-    deleteSkill,
-    deleteSkills,
+    createLocalSkill: async (...args: Parameters<typeof createLocalSkill>) => {
+      try { return await createLocalSkill(...args); } finally { skillInventoryRefreshedAt.delete(args[0]); }
+    },
+    deleteSkill: async (...args: Parameters<typeof deleteSkill>) => {
+      try { return await deleteSkill(...args); } finally { skillInventoryRefreshedAt.delete(args[0]); }
+    },
+    deleteSkills: async (...args: Parameters<typeof deleteSkills>) => {
+      try { return await deleteSkills(...args); } finally { skillInventoryRefreshedAt.delete(args[0]); }
+    },
     makeImportedSkillEditable,
     listTestInputs,
     createTestInput,

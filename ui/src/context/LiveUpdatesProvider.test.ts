@@ -268,6 +268,37 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     });
   });
 
+  it("coalesces company-wide heartbeat invalidations into one trailing refetch", () => {
+    vi.useFakeTimers();
+    try {
+      const invalidations: Array<{ queryKey: unknown }> = [];
+      const queryClient = {
+        invalidateQueries: (input: { queryKey: unknown }) => {
+          invalidations.push(input);
+        },
+      };
+      for (const agentId of ["agent-1", "agent-2", "agent-1"]) {
+        __liveUpdatesTestUtils.invalidateHeartbeatQueries(queryClient as never, "company-9", { agentId, runId: `run-${agentId}` });
+      }
+      const keyCount = (queryKey: unknown) =>
+        invalidations.filter((entry) => JSON.stringify(entry.queryKey) === JSON.stringify(queryKey)).length;
+      expect(keyCount(queryKeys.heartbeats("company-9"))).toBe(0);
+      expect(keyCount(queryKeys.agents.detail("agent-1"))).toBe(2);
+      vi.advanceTimersByTime(5_000);
+      expect(keyCount(queryKeys.heartbeats("company-9"))).toBe(1);
+      expect(keyCount(queryKeys.agents.list("company-9"))).toBe(1);
+      expect(keyCount(queryKeys.dashboard("company-9"))).toBe(1);
+      expect(keyCount(queryKeys.sidebarBadges("company-9"))).toBe(1);
+      expect(keyCount(["costs", "company-9"])).toBe(1);
+      expect(keyCount(queryKeys.heartbeats("company-9", "agent-1"))).toBe(1);
+      expect(keyCount(queryKeys.heartbeats("company-9", "agent-2"))).toBe(1);
+      vi.advanceTimersByTime(60_000);
+      expect(keyCount(queryKeys.heartbeats("company-9"))).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("applies heartbeat progress payloads directly to cached visible issue runs", () => {
     const cache = new Map<string, unknown>([
       [JSON.stringify(queryKeys.liveRuns("company-1")), [{ id: "run-1", currentStatusMessage: null }]],

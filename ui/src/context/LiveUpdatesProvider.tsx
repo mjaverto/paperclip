@@ -1228,13 +1228,23 @@ function applyRunLifecycleToCompanyLiveRuns(
   return present;
 }
 
-function invalidateHeartbeatQueries(
+// Run lifecycle events arrive in bursts; every one used to refetch the run
+// history, agents, dashboard, costs and badges. Coalesce them into at most one
+// trailing refetch per company per window.
+const HEARTBEAT_INVALIDATION_COALESCE_MS = 5_000;
+const pendingHeartbeatInvalidations = new Map<
+  string,
+  { timer: ReturnType<typeof setTimeout>; agentIds: Set<string> }
+>();
+
+function flushHeartbeatInvalidations(
   queryClient: ReturnType<typeof useQueryClient>,
   companyId: string,
-  payload: Record<string, unknown>,
 ) {
-  // Note: liveRuns(companyId) is intentionally NOT invalidated here — it is
-  // event-sourced via applyRunLifecycleToCompanyLiveRuns in the caller.
+  const pending = pendingHeartbeatInvalidations.get(companyId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingHeartbeatInvalidations.delete(companyId);
   queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(companyId) });
@@ -1242,14 +1252,45 @@ function invalidateHeartbeatQueries(
   queryClient.invalidateQueries({
     queryKey: queryKeys.sidebarBadges(companyId),
   });
+  for (const agentId of pending.agentIds) {
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.heartbeats(companyId, agentId),
+    });
+  }
+}
 
+function scheduleHeartbeatInvalidations(
+  queryClient: ReturnType<typeof useQueryClient>,
+  companyId: string,
+  agentId: string | null,
+) {
+  const existing = pendingHeartbeatInvalidations.get(companyId);
+  if (existing) {
+    if (agentId) existing.agentIds.add(agentId);
+    return;
+  }
+  pendingHeartbeatInvalidations.set(companyId, {
+    timer: setTimeout(
+      () => flushHeartbeatInvalidations(queryClient, companyId),
+      HEARTBEAT_INVALIDATION_COALESCE_MS,
+    ),
+    agentIds: new Set(agentId ? [agentId] : []),
+  });
+}
+
+function invalidateHeartbeatQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  companyId: string,
+  payload: Record<string, unknown>,
+) {
+  // Note: liveRuns(companyId) is intentionally NOT invalidated here — it is
+  // event-sourced via applyRunLifecycleToCompanyLiveRuns in the caller.
   const agentId = readString(payload.agentId);
+  scheduleHeartbeatInvalidations(queryClient, companyId, agentId ?? null);
+
   if (agentId) {
     queryClient.invalidateQueries({
       queryKey: queryKeys.agents.detail(agentId),
-    });
-    queryClient.invalidateQueries({
-      queryKey: queryKeys.heartbeats(companyId, agentId),
     });
   }
   const runId = readString(payload.runId);
@@ -1878,6 +1919,7 @@ export const __liveUpdatesTestUtils = {
   hydrateVisibleIssueComment,
   invalidateActivityQueries,
   invalidateHeartbeatQueries,
+  flushHeartbeatInvalidations,
   invalidateHeartbeatProgressQueries,
   invalidateVisibleIssueRunQueries,
   readRunLiveStatusPatchFromPayload,
