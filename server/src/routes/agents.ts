@@ -6679,11 +6679,15 @@ export function agentRoutes(
       ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, parseInt(limitParam, 10) || HEARTBEAT_RUN_LIST_DEFAULT_LIMIT))
       : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
     const summary = req.query.summary === "true" || req.query.summary === "1";
-    const runs = await heartbeat.list(companyId, agentId, limit, { summary });
+    const runs = await heartbeat.list(companyId, agentId, limit, { summary, includeSecretRedactionRegistry: true });
     const readDecisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);
+    // The list query already parsed each context; reuse its registry and strip it
+    // from the response rather than re-reading context_snapshot.
+    const registryByRunId = new Map(runs.map((run) => [run.id, run.contextSnapshot?.paperclipSecretRedactions] as const));
     res.json(await runRedactions.redactForRuns(companyId, runs.map((run, index) =>
       readDecisions[index] ? run : redactHeartbeatRunListRow(run)),
-      req.actor.type === "board" ? getActorInfo(req).actorId : null));
+      null,
+      { registryByRunId }));
   });
 
   router.get("/companies/:companyId/provider-traces", async (req, res) => {
@@ -6825,7 +6829,7 @@ export function agentRoutes(
       avatarUrl: agentAvatarUrl(resolveAgentAppearance(run.agentAppearance, run.agentId), 512),
       execution: projections.get(run.id) ?? null,
       outputSilence: await heartbeat.buildRunOutputSilence(run),
-    }))), req.actor.type === "board" ? getActorInfo(req).actorId : null));
+    }))), null, { includeCredentialName: false }));
   });
 
   function readHeartbeatRunId(req: Request): string {

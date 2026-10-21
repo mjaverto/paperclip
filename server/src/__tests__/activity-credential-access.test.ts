@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, connectionGrants, connectionGrantMembers, createDb, heartbeatRuns, issues, toolApplications, toolConnections } from "@paperclipai/db";
 import { activityService } from "../services/activity.js";
+import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -61,4 +62,34 @@ suite("task credential-access run summary", () => {
     expect((await service.runsForIssue(companyId, issueId, "nicky"))[0]?.resultJson).toEqual({});
   });
 
+  it("reveals the connection name through run redaction only for failed configuration_incomplete runs", async () => {
+    const companyId = randomUUID(), agentId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Redaction fixture", issuePrefix: `R${companyId.slice(0, 6)}` });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Codie", role: "engineer", status: "idle", adapterType: "codex_local" });
+    const resultJson = { configurationIncomplete: { credentialAccess: { connectionName: "Dotta’s API Key" } } };
+    const insertRun = async (status: string, errorCode: string) => {
+      const id = randomUUID();
+      await db.insert(heartbeatRuns).values({ id, companyId, agentId, scopeKind: "agent", responsibleUserId: "nicky", status, errorCode, resultJson });
+      return id;
+    };
+    const failed = await insertRun("failed", "configuration_incomplete");
+    const cancelled = await insertRun("cancelled", "configuration_incomplete");
+    const leaseLost = await insertRun("failed", "controller_lease_lost");
+    const registry = createRunSecretRedactionRegistry(db);
+    const runs = [failed, cancelled, leaseLost].map((id) => ({ id, resultJson }));
+    const byId = (rows: Array<{ id: string; resultJson: unknown }>) => new Map(rows.map((row) => [row.id, row.resultJson]));
+    const named = { configurationIncomplete: { credentialAccess: { connectionName: "Dotta’s API Key" } } };
+    const hidden = { configurationIncomplete: { credentialAccess: {} } };
+
+    const asResponsible = byId(await registry.redactForRuns(companyId, runs, "nicky"));
+    expect(asResponsible.get(failed)).toEqual(named);
+    // A status or error-code mismatch must not reveal the name, even to the responsible user.
+    expect(asResponsible.get(cancelled)).toEqual(hidden);
+    expect(asResponsible.get(leaseLost)).toEqual(hidden);
+
+    expect(byId(await registry.redactForRuns(companyId, runs, "another-reader")).get(failed)).toEqual(hidden);
+    expect(byId(await registry.redactForRuns(companyId, runs, null)).get(failed)).toEqual(hidden);
+    // List routes opt out of the name entirely.
+    expect(byId(await registry.redactForRuns(companyId, runs, "nicky", { includeCredentialName: false })).get(failed)).toEqual(hidden);
+  });
 });

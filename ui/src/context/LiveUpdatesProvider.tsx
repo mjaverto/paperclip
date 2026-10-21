@@ -1230,11 +1230,13 @@ function applyRunLifecycleToCompanyLiveRuns(
 
 // Run lifecycle events arrive in bursts; every one used to refetch the run
 // history, agents, dashboard, costs and badges. Coalesce them into at most one
-// trailing refetch per company per window.
+// trailing refetch per company per window. Only the company-wide keys are
+// coalesced; the per-agent run list is invalidated immediately (it only
+// refetches while that agent's page is mounted).
 const HEARTBEAT_INVALIDATION_COALESCE_MS = 5_000;
 const pendingHeartbeatInvalidations = new Map<
   string,
-  { timer: ReturnType<typeof setTimeout>; agentIds: Set<string> }
+  { timer: ReturnType<typeof setTimeout> }
 >();
 
 function flushHeartbeatInvalidations(
@@ -1252,29 +1254,18 @@ function flushHeartbeatInvalidations(
   queryClient.invalidateQueries({
     queryKey: queryKeys.sidebarBadges(companyId),
   });
-  for (const agentId of pending.agentIds) {
-    queryClient.invalidateQueries({
-      queryKey: queryKeys.heartbeats(companyId, agentId),
-    });
-  }
 }
 
 function scheduleHeartbeatInvalidations(
   queryClient: ReturnType<typeof useQueryClient>,
   companyId: string,
-  agentId: string | null,
 ) {
-  const existing = pendingHeartbeatInvalidations.get(companyId);
-  if (existing) {
-    if (agentId) existing.agentIds.add(agentId);
-    return;
-  }
+  if (pendingHeartbeatInvalidations.has(companyId)) return;
   pendingHeartbeatInvalidations.set(companyId, {
     timer: setTimeout(
       () => flushHeartbeatInvalidations(queryClient, companyId),
       HEARTBEAT_INVALIDATION_COALESCE_MS,
     ),
-    agentIds: new Set(agentId ? [agentId] : []),
   });
 }
 
@@ -1286,9 +1277,12 @@ function invalidateHeartbeatQueries(
   // Note: liveRuns(companyId) is intentionally NOT invalidated here — it is
   // event-sourced via applyRunLifecycleToCompanyLiveRuns in the caller.
   const agentId = readString(payload.agentId);
-  scheduleHeartbeatInvalidations(queryClient, companyId, agentId ?? null);
+  scheduleHeartbeatInvalidations(queryClient, companyId);
 
   if (agentId) {
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.heartbeats(companyId, agentId),
+    });
     queryClient.invalidateQueries({
       queryKey: queryKeys.agents.detail(agentId),
     });

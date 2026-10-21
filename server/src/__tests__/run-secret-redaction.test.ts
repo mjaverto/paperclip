@@ -139,6 +139,33 @@ describe("batched run secret redaction", () => {
     expect(viewerSql.indexOf('"error_code"')).toBeLessThan(viewerSql.indexOf('"result_json"'));
   });
 
+  it("skips the registry query when the caller supplies each run's registry and strips it from the output", async () => {
+    const { registry, select } = fixture([]);
+    const registryByRunId = new Map<string, unknown>([
+      ["a", [{ fingerprintSha256: "one", material: { value: secret } }]],
+      ["b", undefined],
+    ]);
+    const result = await registry.redactForRuns(
+      "company",
+      [
+        { id: "a", text: secret, contextSnapshot: { issueId: "i", paperclipSecretRedactions: registryByRunId.get("a") } },
+        { id: "b", text: secret },
+      ],
+      null,
+      { registryByRunId },
+    );
+    expect(select).not.toHaveBeenCalled();
+    expect(result).toEqual([{ id: "a", text: REDACTED_EVENT_VALUE, contextSnapshot: { issueId: "i" } }, { id: "b", text: secret }]);
+  });
+
+  it("selects a constant null credential name when the caller opts out", async () => {
+    const { registry, select } = fixture([{ id: "a", contextSnapshot: {} }]);
+    await registry.redactForRuns("company", [{ id: "a" }], "user-1", { includeCredentialName: false });
+    const credentialSql = new PgDialect().sqlToQuery((select.mock.calls[0][0] as unknown as { credentialConnectionName: import("drizzle-orm").SQL }).credentialConnectionName).sql;
+    expect(credentialSql).not.toContain("result_json");
+    expect(credentialSql).not.toContain("connection_grants");
+  });
+
   it("does not query for an empty list and fails closed on decryption failure", async () => {
     const { registry, select } = fixture([{ id: "a", contextSnapshot: { paperclipSecretRedactions: [{ fingerprintSha256: "one", material: {} }] } }]);
     expect(await registry.redactForRuns("company", [])).toEqual([]);
