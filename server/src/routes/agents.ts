@@ -2891,6 +2891,7 @@ export function agentRoutes(
     // persisted and explicitly removable without reaching adapter runtimes.
     const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(companyId, {
       materializeMissing: shouldMaterializeRuntimeSkillsForAdapter(adapterType),
+      allowCachedInventory: true,
       versionSelections: skillVersionSelectionMap(
         desiredSkillEntries.filter((entry) => resolvedKeys.has(entry.key)),
       ),

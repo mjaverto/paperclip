@@ -125,6 +125,20 @@ describe("batched run secret redaction", () => {
       .toEqual([{ id: "a", text: REDACTED_EVENT_VALUE }]);
   });
 
+  it("never reads result_json for the credential name without a viewer and gates it on cheap run columns with one", async () => {
+    const dialect = new PgDialect();
+    const noViewer = fixture([{ id: "a", contextSnapshot: {} }]);
+    await noViewer.registry.redactForRuns("company", [{ id: "a" }]);
+    const anonymousSql = dialect.sqlToQuery((noViewer.select.mock.calls[0][0] as unknown as { credentialConnectionName: import("drizzle-orm").SQL }).credentialConnectionName).sql;
+    expect(anonymousSql).not.toContain("result_json");
+
+    const withViewer = fixture([{ id: "a", contextSnapshot: {} }]);
+    await withViewer.registry.redactForRuns("company", [{ id: "a" }], "user-1");
+    const viewerSql = dialect.sqlToQuery((withViewer.select.mock.calls[0][0] as unknown as { credentialConnectionName: import("drizzle-orm").SQL }).credentialConnectionName).sql;
+    expect(viewerSql.indexOf('"error_code" = \'configuration_incomplete\'')).toBeGreaterThan(-1);
+    expect(viewerSql.indexOf('"error_code"')).toBeLessThan(viewerSql.indexOf('"result_json"'));
+  });
+
   it("does not query for an empty list and fails closed on decryption failure", async () => {
     const { registry, select } = fixture([{ id: "a", contextSnapshot: { paperclipSecretRedactions: [{ fingerprintSha256: "one", material: {} }] } }]);
     expect(await registry.redactForRuns("company", [])).toEqual([]);
