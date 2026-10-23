@@ -178,11 +178,14 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
   }
 
   it.each(["handoff", "operator_stop", "unconfirmed_reassignment", "wrong_source_run", "ordinary_release",
-    "different_assignee", "pending_cleanup", "newer_turn"])("rechecks confirmed reassignment queue recovery (%s)", async scenario => {
+    "different_assignee", "pending_cleanup", "newer_turn"].flatMap(scenario => [
+      { scenario, sameAgent: false }, { scenario, sameAgent: true },
+    ]))("rechecks confirmed reassignment queue recovery ($scenario, sameAgent=$sameAgent)", async ({ scenario, sameAgent }) => {
     const companyId = await seedCompany();
     const previousAgentId = await seedAgent({ companyId });
-    const recipientId = await seedAgent({ companyId });
-    const issueId = await seedIssue({ companyId, assigneeAgentId: scenario === "different_assignee" ? previousAgentId : recipientId });
+    const recipientId = sameAgent ? previousAgentId : await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: scenario === "different_assignee"
+      ? await seedAgent({ companyId }) : recipientId });
     const runId = await seedRun({ companyId, agentId: previousAgentId, status: "cancelled", errorCode: "issue_reassigned",
       contextSnapshot: { issueId },
     });
@@ -220,7 +223,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(wake).toMatchObject({ status: "queued", runId: expect.any(String), requestedByActorType: "agent",
       requestedByActorId: previousAgentId });
     const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.runId!));
-    expect(successor).toMatchObject({ agentId: recipientId, contextSnapshot: { issueId, wakeCommentIds: [comment.id] } });
+    expect(successor).toMatchObject({ agentId: recipientId, contextSnapshot: { issueId } });
+    expect(successor.contextSnapshot?.wakeCommentIds).toEqual(sameAgent ? undefined : [comment.id]);
     await release({ companyId, runId, now: new Date(), resumeStrandedQueue: true });
     expect(await db.select().from(heartbeatRuns)).toHaveLength(2);
   });

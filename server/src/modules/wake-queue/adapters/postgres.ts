@@ -1153,7 +1153,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           run.resultJson?.reassignmentStopConfirmed === true &&
           parseObject(run.resultJson?.executionCancellation).state === "acknowledged" &&
           cancellation?.source === "control_plane" && cancellation.expected &&
-          issueRow?.assigneeAgentId && issueRow.assigneeAgentId !== run.agentId
+          issueRow?.assigneeAgentId
           ? await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.companyId, run.companyId),
               eq(agentWakeupRequests.agentId, issueRow.assigneeAgentId),

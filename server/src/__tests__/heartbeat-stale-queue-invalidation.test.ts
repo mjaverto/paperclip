@@ -235,14 +235,25 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     return { companyId, agentId };
   }
 
-  it("recovers a first assignment after an acknowledged reassignment stop releases its lease", async () => {
+  it.each(["first_assignment", "prior_runs", "same_agent", "same_agent_external_comment"])("recovers a saved assignment after an acknowledged reassignment stop releases its lease (%s)", async scenario => {
     const { companyId, agentId } = await seedCompanyAndAgent();
-    const [recipient] = await db.insert(agents).values({ companyId, name: "New task owner", role: "engineer",
+    const [recipient] = scenario.startsWith("same_agent")
+      ? await db.select().from(agents).where(eq(agents.id, agentId))
+      : await db.insert(agents).values({ companyId, name: "New task owner", role: "engineer",
       status: "idle", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true } }, permissions: {},
     }).returning();
     const [issue] = await db.insert(issues).values({ companyId, title: "First assignment handoff", status: "in_progress",
       assigneeAgentId: recipient.id,
     }).returning();
+    if (scenario === "prior_runs") {
+      for (const previousAgentId of [agentId, recipient.id]) {
+        await db.insert(heartbeatRuns).values({ companyId, agentId: previousAgentId, invocationSource: "assignment",
+          status: "succeeded", runtimeMode: "legacy", contextSnapshot: { issueId: issue.id },
+          createdAt: new Date(Date.now() - 60_000), startedAt: new Date(Date.now() - 60_000),
+          finishedAt: new Date(Date.now() - 30_000),
+        });
+      }
+    }
     const [outgoing] = await db.insert(heartbeatRuns).values({ companyId, agentId, invocationSource: "assignment",
       status: "cancelled", runtimeMode: "legacy", startedAt: new Date(Date.now() - 1000), finishedAt: new Date(),
       errorCode: "issue_reassigned", contextSnapshot: { issueId: issue.id }, resultJson: {
@@ -256,9 +267,13 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       heartbeatRunId: outgoing.id, provider: "local", status: "active",
     }).returning();
     const [comment] = await db.insert(issueComments).values({ companyId, issueId: issue.id,
-      authorAgentId: agentId, createdByRunId: outgoing.id, body: "The review is complete. Continue with the saved result.",
+      authorAgentId: scenario === "same_agent_external_comment" ? null : agentId,
+      authorUserId: scenario === "same_agent_external_comment" ? "responsible-user" : null,
+      createdByRunId: scenario === "same_agent_external_comment" ? null : outgoing.id,
+      body: "The review is complete. Continue with the saved result.",
     }).returning();
-    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, recipient.id))).toHaveLength(0);
+    const previousRecipientRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, recipient.id));
+    expect(previousRecipientRuns).toHaveLength(scenario === "first_assignment" ? 0 : 1);
     expect(await heartbeat.wakeup(recipient.id, { source: "assignment", triggerDetail: "system", reason: "issue_assigned",
       requestedByActorType: "agent", requestedByActorId: agentId,
       payload: { issueId: issue.id, mutation: "update", commentId: comment.id, interruptedRunId: outgoing.id },
@@ -272,6 +287,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await heartbeat.resumeQueuedRuns();
     expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.id)))[0])
       .toMatchObject({ status: "deferred_issue_execution", runId: null });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
     await db.update(environmentLeases).set({ status: "expired", releasedAt: new Date() }).where(eq(environmentLeases.id, lease.id));
     mockAdapterExecute.mockImplementation(async () => {
       await db.update(issues).set({ status: "done" }).where(eq(issues.id, issue.id));
@@ -283,11 +299,14 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(delivered.runId).toBeTruthy();
     await heartbeat.waitForRunExecutionDrain(delivered.runId!);
     await restarted.resumeQueuedRuns();
-    const recipientRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, recipient.id));
+    const recipientRuns = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, recipient.id)))
+      .filter(run => !previousRecipientRuns.some(previous => previous.id === run.id));
     expect(recipientRuns).toHaveLength(1);
     expect(recipientRuns[0]).toMatchObject({ id: delivered.runId, status: "succeeded",
-      contextSnapshot: { issueId: issue.id, wakeCommentIds: [comment.id], wakeReason: "issue_assigned" },
+      contextSnapshot: { issueId: issue.id, wakeReason: "issue_assigned" },
     });
+    expect(recipientRuns[0].contextSnapshot?.wakeCommentIds).toEqual(scenario === "same_agent" ? undefined : [comment.id]);
+    expect((await db.select().from(issueComments).where(eq(issueComments.id, comment.id)))[0]?.body).toBe(comment.body);
     expect(countExecuteCallsForRun(delivered.runId!)).toBe(1);
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, outgoing.id)))[0])
       .toMatchObject({ status: "cancelled", errorCode: "issue_reassigned" });
