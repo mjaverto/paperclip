@@ -1148,6 +1148,21 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           run.runtimeModeResolvedAt === null && run.startedAt === null && run.processStartedAt === null &&
           run.processPid === null && run.processGroupId === null &&
           cancellation?.source === "operator" && cancellation.expected;
+        const [reassignmentWake] = input.resumeStrandedQueue && run.runtimeMode === "legacy" &&
+          run.status === "cancelled" && run.errorCode === "issue_reassigned" &&
+          run.resultJson?.reassignmentStopConfirmed === true &&
+          parseObject(run.resultJson?.executionCancellation).state === "acknowledged" &&
+          cancellation?.source === "control_plane" && cancellation.expected &&
+          issueRow?.assigneeAgentId && issueRow.assigneeAgentId !== run.agentId
+          ? await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, run.companyId),
+              eq(agentWakeupRequests.agentId, issueRow.assigneeAgentId),
+              eq(agentWakeupRequests.source, "assignment"), eq(agentWakeupRequests.reason, "issue_assigned"),
+              eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
+              sql`${agentWakeupRequests.payload}->>'issueId' = ${issueRow.id}`,
+              sql`${agentWakeupRequests.payload}->>'interruptedRunId' = ${run.id}`,
+            )).limit(1)
+          : [];
         const preDrainFacts: PreDrainFacts = {
           issueRowPresent: issueRow !== null,
           executionRunIdMatchesRun: !issueRow || !issueRow.executionRunId || issueRow.executionRunId === run.id,
@@ -1161,10 +1176,10 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           // next explicit wake adopts those messages atomically when it
           // queues a run.
           executionCancellationAcknowledged:
-            isAcknowledgedNativeReassignmentStop(run) ||
+            !reassignmentWake && (isAcknowledgedNativeReassignmentStop(run) ||
             (run.status === "cancelled" &&
             (queuedOperatorStop || parseObject(run.resultJson?.executionCancellation).state === "acknowledged" || isAcknowledgedNativeStop(run)) &&
-            !interruptedQueue),
+            !interruptedQueue)),
         };
         const preDrain = decidePreDrain(preDrainFacts);
 

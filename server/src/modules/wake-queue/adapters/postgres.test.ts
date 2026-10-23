@@ -177,6 +177,54 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     return id;
   }
 
+  it.each(["handoff", "operator_stop", "unconfirmed_reassignment", "wrong_source_run", "ordinary_release",
+    "different_assignee", "pending_cleanup", "newer_turn"])("rechecks confirmed reassignment queue recovery (%s)", async scenario => {
+    const companyId = await seedCompany();
+    const previousAgentId = await seedAgent({ companyId });
+    const recipientId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: scenario === "different_assignee" ? previousAgentId : recipientId });
+    const runId = await seedRun({ companyId, agentId: previousAgentId, status: "cancelled", errorCode: "issue_reassigned",
+      contextSnapshot: { issueId },
+    });
+    await db.update(heartbeatRuns).set({ startedAt: new Date(Date.now() - 1000), finishedAt: new Date(), resultJson: {
+      conversationContinuation: "continue_conversation_v1", reassignmentStopConfirmed: scenario !== "unconfirmed_reassignment",
+      executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() },
+      cancellation: { source: scenario === "operator_stop" ? "operator" : "control_plane", expected: true,
+        initiator: { type: scenario === "operator_stop" ? "user" : "system" },
+        reason: "Execution stopped", recordedAt: new Date().toISOString() },
+    } }).where(eq(heartbeatRuns.id, runId));
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId, authorAgentId: previousAgentId,
+      createdByRunId: runId, body: "Continue with the saved handoff result" }).returning();
+    const wakeId = await seedDeferredWake({ companyId, agentId: recipientId, issueId,
+      requestedByActorType: "agent", requestedByActorId: previousAgentId,
+      payload: { interruptedRunId: scenario === "wrong_source_run" ? randomUUID() : runId,
+        _paperclipWakeContext: { issueId, wakeReason: "issue_assigned", wakeCommentIds: [comment.id] } },
+    });
+    await db.update(agentWakeupRequests).set({ source: "assignment", reason: "issue_assigned" }).where(eq(agentWakeupRequests.id, wakeId));
+    if (scenario === "pending_cleanup") await db.insert(environmentLeases).values({ companyId, heartbeatRunId: runId,
+      provider: "local", status: "pending_cleanup", cleanupStatus: "failed" });
+    if (scenario === "newer_turn") await db.insert(heartbeatRuns).values({ companyId, agentId: recipientId,
+      invocationSource: "assignment", status: "cancelled", startedAt: new Date(), finishedAt: new Date(),
+      contextSnapshot: { issueId }, createdAt: new Date(Date.now() + 1000) });
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
+    });
+    await release({ companyId, runId, now: new Date(), suppressImmediateRecovery: true,
+      ...(scenario === "ordinary_release" ? {} : { resumeStrandedQueue: true }),
+    });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    if (scenario !== "handoff") {
+      expect(wake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+      return;
+    }
+    expect(wake).toMatchObject({ status: "queued", runId: expect.any(String), requestedByActorType: "agent",
+      requestedByActorId: previousAgentId });
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.runId!));
+    expect(successor).toMatchObject({ agentId: recipientId, contextSnapshot: { issueId, wakeCommentIds: [comment.id] } });
+    await release({ companyId, runId, now: new Date(), resumeStrandedQueue: true });
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(2);
+  });
+
   it.each(["assignee", "mentioned"])("preserves a paused recipient's accepted message until resume (%s)", async kind => {
     const companyId = await seedCompany();
     const ownerId = await seedAgent({ companyId });

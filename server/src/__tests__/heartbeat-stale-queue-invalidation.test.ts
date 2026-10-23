@@ -235,6 +235,64 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     return { companyId, agentId };
   }
 
+  it("recovers a first assignment after an acknowledged reassignment stop releases its lease", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [recipient] = await db.insert(agents).values({ companyId, name: "New task owner", role: "engineer",
+      status: "idle", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true } }, permissions: {},
+    }).returning();
+    const [issue] = await db.insert(issues).values({ companyId, title: "First assignment handoff", status: "in_progress",
+      assigneeAgentId: recipient.id,
+    }).returning();
+    const [outgoing] = await db.insert(heartbeatRuns).values({ companyId, agentId, invocationSource: "assignment",
+      status: "cancelled", runtimeMode: "legacy", startedAt: new Date(Date.now() - 1000), finishedAt: new Date(),
+      errorCode: "issue_reassigned", contextSnapshot: { issueId: issue.id }, resultJson: {
+        conversationContinuation: "continue_conversation_v1", reassignmentStopConfirmed: true,
+        executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() },
+        cancellation: { source: "control_plane", expected: true, initiator: { type: "system" },
+          reason: "Cancelled before issue reassignment", recordedAt: new Date().toISOString() },
+      },
+    }).returning();
+    const [lease] = await db.insert(environmentLeases).values({ companyId, issueId: issue.id,
+      heartbeatRunId: outgoing.id, provider: "local", status: "active",
+    }).returning();
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId: issue.id,
+      authorAgentId: agentId, createdByRunId: outgoing.id, body: "The review is complete. Continue with the saved result.",
+    }).returning();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, recipient.id))).toHaveLength(0);
+    expect(await heartbeat.wakeup(recipient.id, { source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      requestedByActorType: "agent", requestedByActorId: agentId,
+      payload: { issueId: issue.id, mutation: "update", commentId: comment.id, interruptedRunId: outgoing.id },
+      contextSnapshot: { issueId: issue.id, taskId: issue.id, source: "issue.update",
+        wakeCommentId: comment.id, interruptedRunId: outgoing.id },
+    })).toBeNull();
+    const [pending] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, recipient.id));
+    expect(pending).toMatchObject({ status: "deferred_issue_execution", runId: null,
+      payload: { executionWait: { recoveryActionId: null } },
+    });
+    await heartbeat.resumeQueuedRuns();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null });
+    await db.update(environmentLeases).set({ status: "expired", releasedAt: new Date() }).where(eq(environmentLeases.id, lease.id));
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issue.id));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Handoff received.", provider: "test", model: "test-model" };
+    });
+    const restarted = heartbeatService(db, { runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" } });
+    await Promise.all([heartbeat.resumeQueuedRuns(), restarted.resumeQueuedRuns()]);
+    const [delivered] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.id));
+    expect(delivered.runId).toBeTruthy();
+    await heartbeat.waitForRunExecutionDrain(delivered.runId!);
+    await restarted.resumeQueuedRuns();
+    const recipientRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, recipient.id));
+    expect(recipientRuns).toHaveLength(1);
+    expect(recipientRuns[0]).toMatchObject({ id: delivered.runId, status: "succeeded",
+      contextSnapshot: { issueId: issue.id, wakeCommentIds: [comment.id], wakeReason: "issue_assigned" },
+    });
+    expect(countExecuteCallsForRun(delivered.runId!)).toBe(1);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, outgoing.id)))[0])
+      .toMatchObject({ status: "cancelled", errorCode: "issue_reassigned" });
+  });
+
   it.each(["legacy", "native"])("delivers an accepted non-assignee queue after its %s owner finished", async runtimeMode => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const [recipient] = await db.insert(agents).values({ companyId, name: "Saved feedback recipient", role: "engineer",
