@@ -190,6 +190,38 @@ RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
+# Deployment toolchain layer (still before the app copy, so it stays cached
+# across commits): GitHub CLI from the upstream apt repo (Debian's is stale),
+# the PostgreSQL 17 client for the server's scheduled DB backups, and build
+# tools for agents that compile native modules.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && install -d -m 0755 /etc/apt/keyrings \
+  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && chmod 0644 /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends \
+    postgresql-client-17 git gh python3 make g++ procps \
+  && rm -rf /var/lib/apt/lists/* \
+  && test -x /usr/lib/postgresql/17/bin/pg_dump \
+  && test -x /usr/lib/postgresql/17/bin/psql
+ENV PAPERCLIP_PG_DUMP_PATH=/usr/lib/postgresql/17/bin/pg_dump \
+  PAPERCLIP_PSQL_PATH=/usr/lib/postgresql/17/bin/psql
+
+# Pinned oh-my-pi binary for the omp_local adapter. Only the release ref is
+# pinned; the installer script itself is fetched from omp.sh.
+ARG OMP_VERSION=v18.12.3
+RUN tmp="$(mktemp -d)" \
+  && curl -fsSL https://omp.sh/install | PI_INSTALL_DIR="$tmp" sh -s -- --binary --ref "${OMP_VERSION}" \
+  && install -m 0755 "$tmp/omp" /usr/local/bin/omp \
+  && rm -rf "$tmp" \
+  && /usr/local/bin/omp --version
+
+# Run agents with the data-volume home mounted at /home/mja311. usermod -d
+# without -m only repoints the passwd entry; the mount supplies the directory.
+RUN usermod -d /home/mja311 node
+
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
