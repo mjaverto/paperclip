@@ -108,6 +108,7 @@ import {
   connectionOwnerProfile,
   type ConnectionOwnerProfile,
 } from "./connection-owner";
+import { createUuid } from "@/lib/uuid";
 
 type ConnectorRowModel = {
   key: string;
@@ -1182,7 +1183,7 @@ export function ConnectorCard({
             if (row.aggregatorApp && isInstalled(row)) onManageAggregator?.(row.aggregatorApp, row.upstreamApps?.find(app => app.accounts.length > 0)?.connectionId);
             else if (row.aggregatorApp) onConnectAggregator?.(row.aggregatorApp);
             else if (action.href) onNavigate(row.slug === "agentmail"
-              ? `${action.href}&setupId=${crypto.randomUUID()}` : action.href);
+              ? `${action.href}&setupId=${createUuid()}` : action.href);
           }}
           aria-label={`${action.label} ${row.name}`}
         >

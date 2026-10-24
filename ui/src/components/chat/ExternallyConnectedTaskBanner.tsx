@@ -32,6 +32,7 @@ import {
   type BoardSendRejection,
   type RetainedBoardSend,
 } from "./board-send-draft";
+import { createUuid } from "@/lib/uuid";
 
 const providerNames: Record<ChatProvider, string> = {
   speko: "Speko",
@@ -850,7 +851,7 @@ function ConnectedTaskComposer({
                   retainedScopeKey.current !== storageKey
                 )
                   return;
-                idempotencyKey.current ??= crypto.randomUUID();
+                idempotencyKey.current ??= createUuid();
                 const input = retainedSend.current ?? {
                   attachmentIds: selectedAttachmentIds,
                   attachmentNames: selectedAttachmentIds.map((id) => ({
