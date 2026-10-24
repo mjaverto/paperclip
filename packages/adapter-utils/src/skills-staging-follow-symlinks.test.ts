@@ -88,6 +88,7 @@ const EXPECTED_SKILLS_STAGING_SITES: Record<string, boolean> = {
   "gemini-local/src/server/acp.ts": true,
   "gemini-local/src/server/execute.ts": true,
   "kimi-local/src/server/execute.ts": true,
+  "omp-local/src/server/execute.ts": true,
   "opencode-local/src/server/execute.ts": true,
   "pi-local/src/server/execute.ts": true,
 };
