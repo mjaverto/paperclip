@@ -113,6 +113,24 @@ export async function applyAgentPolicyHoldsInTransaction(tx: Db, effects: Lifecy
   return changeLockedAgent(tx, effects, agent, "reconcile", {}, holds, patch.restartPause);
 }
 
+/** Expedite an existing stop operation inside the producer's transaction.
+ * Unlike the root retry command, this neither clears a worker lease/error nor
+ * transitions state. A stale version or completed/non-stop phase is a no-op. */
+export async function expediteAgentStopRetryInTransaction(tx: Db,
+  effects: Pick<LifecycleEffects, "notifyWork">, companyId: string, agentId: string, expectedVersion: number) {
+  if (!("nestedIndex" in tx)) throw new AgentLifecycleConflict("Stop retry scheduling requires the caller's transaction");
+  const [updated] = await tx.update(agents).set({
+    lifecycleOperation: sql`${agents.lifecycleOperation} - 'retryAt'`,
+  }).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId),
+    eq(agents.lifecycleVersion, expectedVersion), eq(agents.status, "terminated"),
+    inArray(agents.lifecycleState, ["terminating", "cleaning_up"]),
+    sql`${agents.lifecycleOperation} is not null`,
+  )).returning({ id: agents.id });
+  if (!updated) return false;
+  await effects.notifyWork(tx);
+  return true;
+}
+
 export function createLifecycleStore(db: Db, effects: LifecycleEffects): LifecycleStore {
   const get = (id: string) => db.select().from(agents).where(eq(agents.id, id)).then(rows => rows[0] ?? null);
   return {
@@ -168,10 +186,17 @@ export function createLifecycleStore(db: Db, effects: LifecycleEffects): Lifecyc
       return rows.length > 0;
     },
     async defer(agent, owner, error, now) {
+      // A historical proof gap cannot improve every two seconds. Keep checking
+      // without releasing the stop fence; explicit retry still clears retryAt.
+      const pendingStop = !error && !agent.lifecycleOperation?.hostComplete &&
+        ["pausing", "terminating", "cleaning_up"].includes(agent.lifecycleState);
+      const delayMs = error ? 60_000 : pendingStop
+        ? Math.min(60_000, 2_000 * 2 ** Math.min(5, Math.max(0, (agent.lifecycleOperation?.attempts ?? 1) - 1)))
+        : 2_000;
       const rows = await db.update(agents).set({
         lifecycleError: error,
         lifecycleOperation: sql`(${agents.lifecycleOperation} - 'leaseOwner' - 'leaseUntil')
-          || jsonb_build_object('retryAt', ${new Date(now.getTime() + (error ? 60_000 : 2_000)).toISOString()}::text)`,
+          || jsonb_build_object('retryAt', ${new Date(now.getTime() + delayMs).toISOString()}::text)`,
         updatedAt: now,
       }).where(and(eq(agents.id, agent.id), eq(agents.lifecycleVersion, agent.lifecycleVersion),
         sql`${agents.lifecycleOperation}->>'leaseOwner' = ${owner}`)).returning({ id: agents.id });

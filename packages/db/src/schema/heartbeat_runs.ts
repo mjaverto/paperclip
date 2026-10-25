@@ -111,6 +111,9 @@ export const heartbeatRuns = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    // PostgreSQL checks incoming retry links once per deleted run. The
+    // company-prefixed replacement index cannot serve this FK lookup.
+    retryOfRunIdx: index("heartbeat_runs_retry_of_run_id_idx").on(table.retryOfRunId).concurrently(),
     retainedRecoveryAdoptionIdx: index("heartbeat_runs_retained_recovery_adoption_idx")
       .on(table.id).where(sql`${table.resultJson}->'workspaceRestoreRecovery'->>'schema' = 'paperclip.workspace-restore-recovery.v1'
         and not (coalesce(${table.resultJson}, '{}'::jsonb) ? 'systemRecoveryAdoption')

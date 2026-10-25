@@ -1,0 +1,51 @@
+# Backend-only patch packaging. The parent records this recipe in the source commit.
+# BASE_IMAGE must be the exact deployed linux/amd64 sha256 image ID, streamed to the builder.
+# No registry pull, dependency install, UI build, runner build, or toolchain refresh occurs here.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS deployed
+
+FROM deployed AS compile
+WORKDIR /app
+ARG PAPERCLIP_BUILD_COMMIT
+ENV PAPERCLIP_BUILD_COMMIT=${PAPERCLIP_BUILD_COMMIT}
+# Bundle-runtime preserves absolute module locations. Compile at /app, never a host checkout path.
+RUN rm -rf server/src server/scripts server/dist server/dist-runtime packages/db/src packages/db/dist
+COPY server/src/ /app/server/src/
+COPY server/scripts/ /app/server/scripts/
+COPY packages/db/src/ /app/packages/db/src/
+# Preserve base-image assets and the already-verified runner/provider payload byte-for-byte.
+COPY --from=deployed /app/server/dist/onboarding-assets/ /app/server/dist/onboarding-assets/
+COPY --from=deployed /app/server/dist/built-ins/ /app/server/dist/built-ins/
+COPY --from=deployed /app/server/dist/services/scripts/ /app/server/dist/services/scripts/
+COPY --from=deployed /app/server/dist/vendor/ /app/server/dist/vendor/
+COPY --from=deployed /app/server/dist/install-copilot-assets.mjs /app/server/dist/install-copilot-assets.mjs
+COPY --from=deployed /app/server/dist/materialize-copilot-binary.mjs /app/server/dist/materialize-copilot-binary.mjs
+COPY --from=deployed /app/server/dist/copilot-inner-distribution.mjs /app/server/dist/copilot-inner-distribution.mjs
+# Existing manifests, lockfile, node_modules and compiler binaries come from the immutable base.
+# These commands compile only; this recipe never runs migrations against a database.
+RUN pnpm --filter @paperclipai/db build \
+    && pnpm --filter @paperclipai/server exec tsc \
+    && node server/scripts/write-build-stamp.mjs \
+    && pnpm --filter @paperclipai/server build:runtime
+
+FROM deployed AS production
+ARG PAPERCLIP_BUILD_COMMIT
+ARG PAPERCLIP_BUILD_VERSION
+ARG PAPERCLIP_SOURCE_BUNDLE_SHA256
+ARG PAPERCLIP_SOURCE_PATCH_SHA256
+ARG BASE_IMAGE
+LABEL org.opencontainers.image.revision=${PAPERCLIP_BUILD_COMMIT} \
+      org.opencontainers.image.version=${PAPERCLIP_BUILD_VERSION} \
+      dev.paperclip.source.bundle-sha256=${PAPERCLIP_SOURCE_BUNDLE_SHA256} \
+      dev.paperclip.source.patch-sha256=${PAPERCLIP_SOURCE_PATCH_SHA256} \
+      dev.paperclip.base.image=${BASE_IMAGE}
+ENV PAPERCLIP_BUILD_COMMIT=${PAPERCLIP_BUILD_COMMIT} \
+    PAPERCLIP_BUILD_VERSION=${PAPERCLIP_BUILD_VERSION}
+RUN rm -rf /app/server/src /app/server/scripts /app/server/dist /app/server/dist-runtime /app/packages/db/src /app/packages/db/dist
+COPY --chown=node:node --from=compile /app/server/src/ /app/server/src/
+COPY --chown=node:node --from=compile /app/server/dist/ /app/server/dist/
+COPY --chown=node:node --from=compile /app/server/dist-runtime/ /app/server/dist-runtime/
+COPY --chown=node:node --from=compile /app/packages/db/src/ /app/packages/db/src/
+COPY --chown=node:node --from=compile /app/server/scripts/ /app/server/scripts/
+COPY --chown=node:node --from=compile /app/packages/db/dist/ /app/packages/db/dist/
+# Inherit entrypoint, command, home, toolchains, UI and runner/provider pack unchanged.

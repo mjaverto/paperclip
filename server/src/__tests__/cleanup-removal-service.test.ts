@@ -236,7 +236,7 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     await expect(db.select().from(activityLog).where(eq(activityLog.companyId, companyId))).resolves.toHaveLength(0);
   });
 
-  it("removes heartbeat events by run id before deleting company-owned runs", async () => {
+  it("refuses a foreign-owned event referencing the target run without partially deleting either company", async () => {
     const { agentId, companyId, runId } = await seedFixture();
     const otherCompanyId = randomUUID();
 
@@ -256,6 +256,18 @@ describeEmbeddedPostgres("cleanup removal services", () => {
       message: "event with mismatched company scope",
     });
 
+    await db.insert(heartbeatRunEvents).values({
+      companyId, runId, agentId, seq: 2, eventType: "output", message: "Target-owned history",
+    });
+    const runsBefore = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const eventsBefore = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
+    await expect(companyService(db).remove(companyId)).rejects.toThrow();
+    await expect(db.select().from(companies).where(eq(companies.id, companyId))).resolves.toHaveLength(1);
+    await expect(db.select().from(companies).where(eq(companies.id, otherCompanyId))).resolves.toHaveLength(1);
+    await expect(db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId))).resolves.toEqual(runsBefore);
+    await expect(db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId))).resolves.toEqual(eventsBefore);
+    // The operator must repair malformed historical ownership explicitly.
+    await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.companyId, otherCompanyId));
     const removed = await companyService(db).remove(companyId);
 
     expect(removed?.id).toBe(companyId);

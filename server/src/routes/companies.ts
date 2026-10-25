@@ -49,6 +49,7 @@ import {
   writeImportTransferPart,
 } from "../services/company-import-transfers.js";
 import { companyTransferRunService } from "../services/company-transfer-runs.js";
+import { deleteCompany } from "../services/company-deletion.js";
 import { agentInstructionsBundleMode } from "../services/agent-instructions.js";
 import { resolvePortableExportAgentSelection } from "../services/company-portability-agent-selection.js";
 import {
@@ -1360,12 +1361,26 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
-    const company = await svc.remove(companyId);
-    if (!company) {
-      res.status(404).json({ error: "Company not found" });
-      return;
+    const controller = new AbortController();
+    const abort = () => controller.abort(new Error("Company deletion client disconnected"));
+    const close = () => { if (!res.writableEnded) abort(); };
+    req.once("aborted", abort);
+    res.once("close", close);
+    if (req.aborted || res.destroyed) abort();
+    try {
+      const company = await deleteCompany(db, companyId, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (!company) {
+        res.status(404).json({ error: "Company not found" });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      req.removeListener("aborted", abort);
+      res.removeListener("close", close);
     }
-    res.json({ ok: true });
   });
 
   return router;

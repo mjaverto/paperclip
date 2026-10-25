@@ -13,10 +13,10 @@ import { hasCompanyHoldMismatch, projectCompanyHolds } from "./adapters/company-
 import { createLifecycleWorker } from "./application/worker.js";
 import type { LifecycleDriver } from "./application/ports.js";
 
-export { applyAgentPolicyHoldsInTransaction } from "./adapters/postgres.js";
+export { applyAgentPolicyHoldsInTransaction, expediteAgentStopRetryInTransaction } from "./adapters/postgres.js";
 export { companyHoldMismatch, fenceActiveCompanyAgentStopsInTransaction } from "./adapters/company-policy.js";
 
-export { AgentLifecycleConflict, canConfigureAgentConnection, isAgentAwaitingSetup } from "./domain/policy.js";
+export { AgentLifecycleConflict, assertAgentPurgeAllowed, canConfigureAgentConnection, isAgentAwaitingSetup } from "./domain/policy.js";
 
 export type { HireDecisionTarget } from "./adapters/approvals.js";
 export type { LifecycleDriver, LifecycleAgent, LifecycleFailure } from "./application/ports.js";

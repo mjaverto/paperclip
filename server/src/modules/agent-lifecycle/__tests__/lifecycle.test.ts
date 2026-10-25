@@ -1,4 +1,4 @@
-import { createAgentLifecycle as createLifecycleCommands } from "../index.js";
+import { createAgentLifecycle as createLifecycleCommands, expediteAgentStopRetryInTransaction } from "../index.js";
 import { createAgentLifecycleEffects } from "../../../services/agent-lifecycle.js";
 import { deleteCompany } from "../../../services/company-deletion.js";
 import { agentLifecycleCompanyDeletion } from "../company-deletion.js";
@@ -937,6 +937,40 @@ const support = await getEmbeddedPostgresTestSupport();
     const denied = await request(app({ ...board, companyIds: [], memberships: [] })).post(url).send({});
     expect([403, 404]).toContain(denied.status);
   });
+
+  it("expedites stop retry in the caller transaction without completing cleanup or stealing a live worker lease", async () => {
+    const operation = { id: randomUUID(), hostComplete: false, completedPluginIds: [randomUUID()], attempts: 17,
+      retryAt: new Date(Date.now() + 60_000).toISOString(), leaseOwner: "active-stop-worker",
+      leaseUntil: new Date(Date.now() + 120_000).toISOString() };
+    const [before] = await db.insert(agents).values({ companyId, name: "Delayed stop", status: "terminated",
+      lifecycleState: "terminating", lifecycleVersion: 7, lifecycleError: "Retained failure detail",
+      lifecycleOperation: operation }).returning();
+    const effects = { notifyWork: vi.fn(async (_tx: Db) => {}) };
+    await expect(expediteAgentStopRetryInTransaction(db, effects, companyId, before.id, before.lifecycleVersion))
+      .rejects.toThrow("caller's transaction");
+    expect(await db.transaction(tx => expediteAgentStopRetryInTransaction(
+      tx as unknown as Db, effects, companyId, before.id, before.lifecycleVersion))).toBe(true);
+    const { retryAt, ...retainedOperation } = before.lifecycleOperation!;
+    expect(retryAt).toBe(operation.retryAt);
+    expect(await current(before.id)).toEqual({ ...before, lifecycleOperation: retainedOperation });
+    expect(effects.notifyWork).toHaveBeenCalledTimes(1);
+    expect(await createLifecycleStore(db).claim(before.id, "competing-worker", new Date())).toBeNull();
+  });
+
+  it.each(["stale_version", "foreign_company", "completed_stop", "non_stop_phase"])(
+    "does not expedite %s or notify work for an ineligible stop operation", async scenario => {
+      const [before] = await db.insert(agents).values({ companyId, name: "Unchanged operation",
+        status: scenario === "non_stop_phase" ? "paused" : "terminated",
+        lifecycleState: scenario === "completed_stop" ? "terminated" : scenario === "non_stop_phase" ? "pausing" : "cleaning_up",
+        lifecycleVersion: 7, lifecycleOperation: { id: randomUUID(), hostComplete: false, completedPluginIds: [], attempts: 3,
+          retryAt: new Date(Date.now() + 60_000).toISOString() } }).returning();
+      const effects = { notifyWork: vi.fn(async (_tx: Db) => {}) };
+      expect(await db.transaction(tx => expediteAgentStopRetryInTransaction(tx as unknown as Db, effects,
+        scenario === "foreign_company" ? randomUUID() : companyId, before.id,
+        before.lifecycleVersion + (scenario === "stale_version" ? 1 : 0)))).toBe(false);
+      expect(await current(before.id)).toEqual(before);
+      expect(effects.notifyWork).not.toHaveBeenCalled();
+    });
 
   it("recovers an expired lease and never accepts an expired completion", async () => {
     const agent = await hire("paused"); const store = createLifecycleStore(db);

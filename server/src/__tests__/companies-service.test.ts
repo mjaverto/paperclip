@@ -112,6 +112,55 @@ describeEmbeddedPostgres("companyService", () => {
     expect(rows.map((row) => row.issuePrefix).sort()).toEqual(["ARO", "AROA"]);
   });
 
+  it("refuses foreign retry references atomically before removing only the selected company's history", async () => {
+    const targetCompanyId = randomUUID(), otherCompanyId = randomUUID();
+    const targetAgentId = randomUUID(), otherAgentId = randomUUID();
+    const targetRunId = randomUUID(), retryRunId = randomUUID(), otherRunId = randomUUID();
+    await db.insert(companies).values([
+      { id: targetCompanyId, name: "Remove this company", status: "archived", issuePrefix: `DT${targetCompanyId.slice(0, 6)}` },
+      { id: otherCompanyId, name: "Preserve this company", issuePrefix: `DO${otherCompanyId.slice(0, 6)}` },
+    ]);
+    await insertAgents([
+      { id: targetAgentId, companyId: targetCompanyId, name: "Retired target", status: "terminated" },
+      { id: otherAgentId, companyId: otherCompanyId, name: "Retired survivor", status: "terminated" },
+    ]);
+    await db.insert(heartbeatRuns).values({
+      id: targetRunId, companyId: targetCompanyId, agentId: targetAgentId, status: "succeeded",
+    });
+    await db.insert(heartbeatRuns).values([
+      { id: retryRunId, companyId: targetCompanyId, agentId: targetAgentId, status: "succeeded", retryOfRunId: targetRunId },
+      { id: otherRunId, companyId: otherCompanyId, agentId: otherAgentId, status: "succeeded",
+        retryOfRunId: targetRunId, resultJson: { summary: "Unrelated history must survive" } },
+    ]);
+    await db.insert(heartbeatRunEvents).values([
+      { companyId: targetCompanyId, runId: targetRunId, agentId: targetAgentId, seq: 1, eventType: "output", message: "Target output" },
+      { companyId: otherCompanyId, runId: otherRunId, agentId: otherAgentId, seq: 1, eventType: "output", message: "Surviving output" },
+    ]);
+    const [otherCompany] = await db.select().from(companies).where(eq(companies.id, otherCompanyId));
+    const [otherAgent] = await db.select().from(agents).where(eq(agents.id, otherAgentId));
+    const [otherRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, otherRunId));
+    const [otherEvent] = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, otherRunId));
+
+    await expect(companyService(db).remove(targetCompanyId)).rejects.toThrow();
+    expect(await db.select().from(companies).where(eq(companies.id, targetCompanyId))).toHaveLength(1);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, targetCompanyId))).toHaveLength(2);
+    expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.companyId, targetCompanyId))).toHaveLength(1);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, otherRunId))).toEqual([otherRun]);
+    expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, otherRunId))).toEqual([otherEvent]);
+    // Repair the invalid historical boundary explicitly, not as a side effect
+    // of deleting a different company.
+    await db.update(heartbeatRuns).set({ retryOfRunId: null }).where(eq(heartbeatRuns.id, otherRunId));
+    expect(await companyService(db).remove(targetCompanyId)).toMatchObject({ id: targetCompanyId });
+    expect(await db.select().from(companies).where(eq(companies.id, targetCompanyId))).toEqual([]);
+    expect(await db.select().from(agents).where(eq(agents.companyId, targetCompanyId))).toEqual([]);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, targetCompanyId))).toEqual([]);
+    expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.companyId, targetCompanyId))).toEqual([]);
+    expect(await db.select().from(companies).where(eq(companies.id, otherCompanyId))).toEqual([otherCompany]);
+    expect(await db.select().from(agents).where(eq(agents.id, otherAgentId))).toEqual([otherAgent]);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, otherRunId))).toEqual([{ ...otherRun, retryOfRunId: null }]);
+    expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, otherRunId))).toEqual([otherEvent]);
+  });
+
   it("leaves unrelated company-hold projection out of name edits", async () => {
     const [company] = await db.insert(companies).values({ name: "Rename only", issuePrefix: "REN" }).returning();
     const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Unrelated agent",

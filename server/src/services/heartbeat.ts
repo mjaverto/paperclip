@@ -309,6 +309,7 @@ import {
   and,
   eq,
   exists,
+  gt,
   inArray,
   isNull,
   notInArray,
@@ -3937,23 +3938,34 @@ export function heartbeatService(
   }
 
   async function stopInvocationsForAgents(agentIds: string[], reason: string) {
+    if (!agentIds.length) return true;
     await cancelInvocationsForAgentsInternal(agentIds, reason);
-    const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
-    const leasesToRelease = await db.select({ runId: environmentLeases.heartbeatRunId }).from(environmentLeases)
-      .innerJoin(heartbeatRuns, eq(heartbeatRuns.id, environmentLeases.heartbeatRunId))
-      .where(and(inArray(heartbeatRuns.agentId, agentIds),
-        or(and(eq(heartbeatRuns.status, "cancelled"), inArray(environmentLeases.status, ["active", "pending_cleanup"])),
-          and(eq(environmentLeases.status, "retained"), eq(environmentLeases.cleanupStatus, "failed")))));
-    const needsRelease = new Set(leasesToRelease.map(lease => lease.runId));
-    for (const run of runs) {
-      if (!isHeartbeatRunTerminalStatus(run.status) || liveRunExecutions.has(run.id) ||
-          adapterExecutionControls.has(run.id) || processRunCancellationSettlements.has(run.id) ||
-          (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > new Date())) return false;
-      if (needsRelease.has(run.id)) {
-        // Retry incomplete cleanup after a run becomes terminal.
-        await releaseEnvironmentLeasesForRun({ runId: run.id, companyId: run.companyId,
-          agentId: run.agentId, status: run.status, providerResourceDisposition: "destroy" });
+    let cursor: string | undefined;
+    const batchSize = 256;
+    for (;;) {
+      const runs = await db.select({
+        id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+        status: heartbeatRuns.status, controllerLeaseExpiresAt: heartbeatRuns.controllerLeaseExpiresAt,
+        needsRelease: exists(db.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
+          eq(environmentLeases.heartbeatRunId, heartbeatRuns.id),
+          or(and(eq(heartbeatRuns.status, "cancelled"), inArray(environmentLeases.status, ["active", "pending_cleanup"])),
+            and(eq(environmentLeases.status, "retained"), eq(environmentLeases.cleanupStatus, "failed"))),
+        ))),
+      }).from(heartbeatRuns).where(and(
+        inArray(heartbeatRuns.agentId, agentIds), cursor ? gt(heartbeatRuns.id, cursor) : undefined,
+      )).orderBy(heartbeatRuns.id).limit(batchSize);
+      for (const run of runs) {
+        if (!isHeartbeatRunTerminalStatus(run.status) || liveRunExecutions.has(run.id) ||
+            adapterExecutionControls.has(run.id) || processRunCancellationSettlements.has(run.id) ||
+            (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > new Date())) return false;
+        if (run.needsRelease) {
+          // Retry incomplete cleanup after a run becomes terminal.
+          await releaseEnvironmentLeasesForRun({ runId: run.id, companyId: run.companyId,
+            agentId: run.agentId, status: run.status, providerResourceDisposition: "destroy" });
+        }
       }
+      if (runs.length < batchSize) break;
+      cursor = runs[runs.length - 1]!.id;
     }
     return agentExecutionsHaveStopped(db, agentIds);
   }
