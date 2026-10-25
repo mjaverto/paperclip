@@ -13,18 +13,10 @@ RUN rm -rf server/src server/scripts server/dist server/dist-runtime packages/db
 COPY server/src/ /app/server/src/
 COPY server/scripts/ /app/server/scripts/
 COPY packages/db/src/ /app/packages/db/src/
-# Preserve base-image assets and the already-verified runner/provider payload byte-for-byte.
-COPY --from=deployed /app/server/dist/onboarding-assets/ /app/server/dist/onboarding-assets/
-COPY --from=deployed /app/server/dist/built-ins/ /app/server/dist/built-ins/
-COPY --from=deployed /app/server/dist/services/scripts/ /app/server/dist/services/scripts/
-COPY --from=deployed /app/server/dist/vendor/ /app/server/dist/vendor/
-COPY --from=deployed /app/server/dist/install-copilot-assets.mjs /app/server/dist/install-copilot-assets.mjs
-COPY --from=deployed /app/server/dist/materialize-copilot-binary.mjs /app/server/dist/materialize-copilot-binary.mjs
-COPY --from=deployed /app/server/dist/copilot-inner-distribution.mjs /app/server/dist/copilot-inner-distribution.mjs
 # Existing manifests, lockfile, node_modules and compiler binaries come from the immutable base.
 # pnpm is only a corepack shim in the runtime image and would download itself, so this offline
 # build calls the same package scripts' compiler commands directly (db build, server tsc,
-# build stamp, runtime bundle). This recipe never runs migrations against a database.
+# base asset restore, build stamp, runtime bundle). This recipe never runs migrations against a database.
 RUN cd packages/db \
     && ./node_modules/.bin/tsx src/check-migration-numbering.ts \
     && ./node_modules/.bin/tsx src/check-migration-safety.ts \
@@ -34,9 +26,18 @@ RUN cd packages/db \
     && cp src/migrations/*.sql dist/migrations/ \
     && cp src/migrations/meta/_journal.json dist/migrations/meta/ \
     && cd ../../server \
-    && ./node_modules/.bin/tsc \
-    && cd .. \
-    && node server/scripts/write-build-stamp.mjs \
+    && ./node_modules/.bin/tsc
+# tsc emits the development runner shim (server/src/vendor/paperclip-runner/index.ts, which loads
+# TypeScript source at runtime). The real server build replaces it with the compiled runner dist, so
+# restore the base-image assets and the already-verified compiled runner payload AFTER tsc, before the bundle.
+COPY --from=deployed /app/server/dist/onboarding-assets/ /app/server/dist/onboarding-assets/
+COPY --from=deployed /app/server/dist/built-ins/ /app/server/dist/built-ins/
+COPY --from=deployed /app/server/dist/services/scripts/ /app/server/dist/services/scripts/
+COPY --from=deployed /app/server/dist/vendor/ /app/server/dist/vendor/
+COPY --from=deployed /app/server/dist/install-copilot-assets.mjs /app/server/dist/install-copilot-assets.mjs
+COPY --from=deployed /app/server/dist/materialize-copilot-binary.mjs /app/server/dist/materialize-copilot-binary.mjs
+COPY --from=deployed /app/server/dist/copilot-inner-distribution.mjs /app/server/dist/copilot-inner-distribution.mjs
+RUN node server/scripts/write-build-stamp.mjs \
     && cd server \
     && node scripts/bundle-runtime.mjs
 
