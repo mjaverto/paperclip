@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
-  agents, companies, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, environmentLeases,
-  heartbeatRunEvents, heartbeatRuns, issues, nativeRunFinalizations, type Db,
+  agentMemberships, agents, companies, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, environmentLeases,
+  heartbeatRunEvents, heartbeatRuns, issueRelations, issues, nativeRunFinalizations, statusCards, statusCardUpdates, type Db,
 } from "@paperclipai/db";
+import { defaultStatusCardRefreshPolicy } from "@paperclipai/shared";
 import { configureAgentLifecycle } from "../services/agent-lifecycle.js";
 import { createLifecycleDriver } from "../services/agent-lifecycle-driver.js";
 import { deleteCompany } from "../services/company-deletion.js";
@@ -22,6 +23,10 @@ const support = await getEmbeddedPostgresTestSupport();
     configureAgentLifecycle(db, createLifecycleDriver(db, {} as never));
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterEach(async () => {
+    await db.delete(statusCardUpdates);
+    await db.delete(statusCards);
+    await db.delete(agentMemberships);
+    await db.delete(issueRelations);
     await db.delete(nativeRunFinalizations);
     await db.delete(environmentLeases);
     await db.delete(costEvents);
@@ -42,6 +47,90 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.insert(heartbeatRunEvents).values({ companyId, agentId, runId, seq: 1, eventType: "output", message: "Preserve on rollback" });
     return { companyId, agentId, runId };
   }
+
+  async function snapshotCompany(companyId: string) {
+    return {
+      company: await db.select().from(companies).where(eq(companies.id, companyId)),
+      agents: await db.select().from(agents).where(eq(agents.companyId, companyId)).orderBy(agents.id),
+      runs: await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)).orderBy(heartbeatRuns.id),
+      events: await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.companyId, companyId)).orderBy(heartbeatRunEvents.id),
+      issues: await db.select().from(issues).where(eq(issues.companyId, companyId)).orderBy(issues.id),
+    };
+  }
+
+  it("refuses a foreign issue relation before deleting any target data, then permits deletion after explicit repair", async () => {
+    const target = await seed(), other = await seed();
+    const [targetIssue] = await db.insert(issues).values({ companyId: target.companyId, title: "Target issue" }).returning();
+    const [foreignIssue, repairedRelatedIssue] = await db.insert(issues).values([
+      { companyId: other.companyId, title: "Foreign issue" },
+      { companyId: other.companyId, title: "Valid foreign dependency" },
+    ]).returning();
+    const [relation] = await db.insert(issueRelations).values({ companyId: other.companyId,
+      issueId: foreignIssue.id, relatedIssueId: targetIssue.id, type: "blocks" }).returning();
+    const targetBefore = await snapshotCompany(target.companyId), otherBefore = await snapshotCompany(other.companyId);
+
+    await expect(deleteCompany(db, target.companyId)).rejects.toMatchObject({ name: "AgentLifecycleConflict" });
+    expect(await snapshotCompany(target.companyId)).toEqual(targetBefore);
+    expect(await snapshotCompany(other.companyId)).toEqual(otherBefore);
+    expect(await db.select().from(issueRelations).where(eq(issueRelations.id, relation.id))).toEqual([relation]);
+
+    await db.update(issueRelations).set({ relatedIssueId: repairedRelatedIssue.id }).where(eq(issueRelations.id, relation.id));
+    expect(await deleteCompany(db, target.companyId)).toMatchObject({ id: target.companyId });
+    expect(await snapshotCompany(target.companyId)).toEqual({ company: [], agents: [], runs: [], events: [], issues: [] });
+    expect(await snapshotCompany(other.companyId)).toEqual(otherBefore);
+    expect(await db.select().from(issueRelations).where(eq(issueRelations.id, relation.id)))
+      .toEqual([{ ...relation, relatedIssueId: repairedRelatedIssue.id }]);
+  });
+
+  it("preserves a foreign agent membership rather than cascading it through a target agent deletion", async () => {
+    const target = await seed(), other = await seed();
+    const [membership] = await db.insert(agentMemberships).values({ companyId: other.companyId,
+      agentId: target.agentId, userId: "foreign-board-user", state: "joined" }).returning();
+    const targetBefore = await snapshotCompany(target.companyId), otherBefore = await snapshotCompany(other.companyId);
+
+    await expect(deleteCompany(db, target.companyId)).rejects.toMatchObject({ name: "AgentLifecycleConflict" });
+    expect(await snapshotCompany(target.companyId)).toEqual(targetBefore);
+    expect(await snapshotCompany(other.companyId)).toEqual(otherBefore);
+    expect(await db.select().from(agentMemberships).where(eq(agentMemberships.id, membership.id))).toEqual([membership]);
+
+    await db.update(agentMemberships).set({ agentId: other.agentId }).where(eq(agentMemberships.id, membership.id));
+    expect(await deleteCompany(db, target.companyId)).toMatchObject({ id: target.companyId });
+    expect(await snapshotCompany(target.companyId)).toEqual({ company: [], agents: [], runs: [], events: [], issues: [] });
+    expect(await snapshotCompany(other.companyId)).toEqual(otherBefore);
+    expect(await db.select().from(agentMemberships).where(eq(agentMemberships.id, membership.id)))
+      .toEqual([{ ...membership, agentId: other.agentId }]);
+  });
+
+  it("resolves indirect status-card ownership before allowing a run deletion to null a foreign update", async () => {
+    const target = await seed(), other = await seed();
+    const [targetCard, foreignCard] = await db.insert(statusCards).values([
+      { companyId: target.companyId, interestPrompt: "Target status", refreshPolicy: defaultStatusCardRefreshPolicy },
+      { companyId: other.companyId, interestPrompt: "Foreign status", refreshPolicy: defaultStatusCardRefreshPolicy },
+    ]).returning();
+    const [targetUpdate, foreignUpdate] = await db.insert(statusCardUpdates).values([
+      { cardId: targetCard.id, runId: target.runId, kind: "full", trigger: "manual", status: "ok" },
+      { cardId: foreignCard.id, runId: target.runId, kind: "full", trigger: "manual", status: "ok", changeSummary: "Retain this foreign history" },
+    ]).returning();
+    const targetBefore = await snapshotCompany(target.companyId), otherBefore = await snapshotCompany(other.companyId);
+
+    await expect(deleteCompany(db, target.companyId)).rejects.toMatchObject({ name: "AgentLifecycleConflict" });
+    expect(await snapshotCompany(target.companyId)).toEqual(targetBefore);
+    expect(await snapshotCompany(other.companyId)).toEqual(otherBefore);
+    expect(await db.select().from(statusCards).where(eq(statusCards.id, targetCard.id))).toEqual([targetCard]);
+    expect(await db.select().from(statusCardUpdates).where(eq(statusCardUpdates.id, targetUpdate.id))).toEqual([targetUpdate]);
+    expect(await db.select().from(statusCards).where(eq(statusCards.id, foreignCard.id))).toEqual([foreignCard]);
+    expect(await db.select().from(statusCardUpdates).where(eq(statusCardUpdates.id, foreignUpdate.id))).toEqual([foreignUpdate]);
+
+    await db.update(statusCardUpdates).set({ runId: other.runId }).where(eq(statusCardUpdates.id, foreignUpdate.id));
+    expect(await deleteCompany(db, target.companyId)).toMatchObject({ id: target.companyId });
+    expect(await snapshotCompany(target.companyId)).toEqual({ company: [], agents: [], runs: [], events: [], issues: [] });
+    expect(await db.select().from(statusCards).where(eq(statusCards.id, targetCard.id))).toEqual([]);
+    expect(await db.select().from(statusCardUpdates).where(eq(statusCardUpdates.id, targetUpdate.id))).toEqual([]);
+    expect(await snapshotCompany(other.companyId)).toEqual(otherBefore);
+    expect(await db.select().from(statusCards).where(eq(statusCards.id, foreignCard.id))).toEqual([foreignCard]);
+    expect(await db.select().from(statusCardUpdates).where(eq(statusCardUpdates.id, foreignUpdate.id)))
+      .toEqual([{ ...foreignUpdate, runId: other.runId }]);
+  });
 
   it("refuses to erase a started legacy cancellation while the real lifecycle host still lacks stop proof", async () => {
     const f = await seed();

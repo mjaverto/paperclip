@@ -2,7 +2,7 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
 import { agentObservabilityService } from "./agent-observability.js";
 import { withAccountHomeSecretMutationLock } from "@paperclipai/adapter-codex-local/server";
 import { withDedicatedDbConnection, type Db } from "@paperclipai/db";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, ne, sql, type SQL } from "drizzle-orm";
 import { createAgentLifecycle, processAgentLifecycle } from "./agent-lifecycle.js";
 import { requestRestorePointDeletion } from "./git-restore-point-ledger.js";
 import { agentLifecycleCompanyDeletion } from "../modules/agent-lifecycle/company-deletion.js";
@@ -32,42 +32,128 @@ import {
 
 type DeletionTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
-// Nullable run references must not silently rewrite another company's history.
-// Inspect the actual FK tuples (including native composite ownership keys), not
-// a hand-maintained subset of links that can fall behind the schema.
-async function assertCompanyRunBoundary(
+// A company delete must not cascade or SET NULL another company's records.
+// Ownership is sometimes indirect (for example status_card_updates -> cards),
+// so inspect the actual FK graph rather than maintaining a partial link list.
+async function assertCompanyDeletionBoundary(
   tx: DeletionTransaction,
   id: string,
   run: <T>(query: PromiseLike<T>) => Promise<T>,
 ) {
-  const references = await run(tx.execute<{
-    schema_name: string; table_name: string; child_columns: string[]; run_columns: string[];
-  }>(sql`
-    select ns.nspname as schema_name, child.relname as table_name,
+  type Reference = {
+    constraint_id: string;
+    child_id: string; child_schema: string; child_table: string; child_has_company: boolean;
+    parent_id: string; parent_schema: string; parent_table: string; parent_has_company: boolean;
+    child_columns: string[]; parent_columns: string[];
+  };
+  const references = await run(tx.execute<Reference>(sql`
+    select fk.oid::text as constraint_id,
+      child.oid::text as child_id, cns.nspname as child_schema, child.relname as child_table,
+      parent.oid::text as parent_id, pns.nspname as parent_schema, parent.relname as parent_table,
+      exists (select 1 from pg_attribute a where a.attrelid = child.oid
+        and a.attname = 'company_id' and not a.attisdropped) as child_has_company,
+      exists (select 1 from pg_attribute a where a.attrelid = parent.oid
+        and a.attname = 'company_id' and not a.attisdropped) as parent_has_company,
       array_agg(ca.attname::text order by keys.ordinality) as child_columns,
-      array_agg(ra.attname::text order by keys.ordinality) as run_columns
+      array_agg(pa.attname::text order by keys.ordinality) as parent_columns
     from pg_constraint fk
     join pg_class child on child.oid = fk.conrelid
-    join pg_namespace ns on ns.oid = child.relnamespace
-    cross join lateral unnest(fk.conkey, fk.confkey) with ordinality as keys(child_key, run_key, ordinality)
+    join pg_namespace cns on cns.oid = child.relnamespace
+    join pg_class parent on parent.oid = fk.confrelid
+    join pg_namespace pns on pns.oid = parent.relnamespace
+    cross join lateral unnest(fk.conkey, fk.confkey) with ordinality as keys(child_key, parent_key, ordinality)
     join pg_attribute ca on ca.attrelid = child.oid and ca.attnum = keys.child_key
-    join pg_attribute ra on ra.attrelid = fk.confrelid and ra.attnum = keys.run_key
-    where fk.contype = 'f' and fk.confrelid = 'heartbeat_runs'::regclass
-      and exists (select 1 from pg_attribute a where a.attrelid = child.oid
-        and a.attname = 'company_id' and not a.attisdropped)
-    group by fk.oid, ns.nspname, child.relname
+    join pg_attribute pa on pa.attrelid = parent.oid and pa.attnum = keys.parent_key
+    where fk.contype = 'f'
+    group by fk.oid, child.oid, child.relname, cns.nspname, parent.oid, parent.relname, pns.nspname
   `));
+  const ownershipColumns = new Map<string, string>();
+  const parents = new Map<string, Reference[]>();
   for (const reference of references) {
-    const join = sql.join(reference.child_columns.map((column, index) =>
-      sql`child.${sql.identifier(column)} = owned.${sql.identifier(reference.run_columns[index]!)}`,
+    if (reference.child_has_company) ownershipColumns.set(reference.child_id, "company_id");
+    if (reference.parent_has_company) ownershipColumns.set(reference.parent_id, "company_id");
+    if (reference.child_table === "companies") ownershipColumns.set(reference.child_id, "id");
+    if (reference.parent_table === "companies") ownershipColumns.set(reference.parent_id, "id");
+    const edges = parents.get(reference.child_id) ?? [];
+    edges.push(reference);
+    parents.set(reference.child_id, edges);
+  }
+  function ownershipPaths(tableId: string, excludedConstraint?: string): Reference[][] {
+    const paths: Reference[][] = [];
+    const pending = [{ tableId, path: [] as Reference[], visited: new Set([tableId]) }];
+    let traversed = 0;
+    while (pending.length > 0) {
+      // Bound total work too, not just breadth, in a multiply linked graph.
+      if (++traversed > 256) {
+        throw new AgentLifecycleConflict("Company deletion cannot establish bounded dependency ownership");
+      }
+      const next = pending.pop()!;
+      if (ownershipColumns.has(next.tableId)) {
+        paths.push(next.path);
+        continue;
+      }
+      for (const edge of parents.get(next.tableId) ?? []) {
+        if (edge.constraint_id === excludedConstraint || next.visited.has(edge.parent_id)) continue;
+        pending.push({
+          tableId: edge.parent_id, path: [...next.path, edge],
+          visited: new Set([...next.visited, edge.parent_id]),
+        });
+      }
+      // Schema topology, not historical row count, bounds this traversal.
+      // Never silently skip ambiguous ownership if a future schema exceeds it.
+      if (pending.length + paths.length > 256) {
+        throw new AgentLifecycleConflict("Company deletion cannot establish bounded dependency ownership");
+      }
+    }
+    return paths;
+  }
+  function match(reference: Reference, child: string, parent: string): SQL {
+    return sql.join(reference.child_columns.map((column, index) =>
+      sql`${sql.identifier(child)}.${sql.identifier(column)} = ${sql.identifier(parent)}.${sql.identifier(reference.parent_columns[index]!)}`,
     ), sql` and `);
+  }
+  function ownerPredicate(tableId: string, alias: string, paths: Reference[][], foreign: boolean): SQL {
+    const comparison = foreign ? sql`<> ${id}` : sql`= ${id}`;
+    return sql.join(paths.map((path) => {
+      if (path.length === 0) {
+        return sql`${sql.identifier(alias)}.${sql.identifier(ownershipColumns.get(tableId)!)} ${comparison}`;
+      }
+      const first = path[0]!;
+      const from = sql`${sql.identifier(first.parent_schema)}.${sql.identifier(first.parent_table)} owner_0`;
+      const joins = path.slice(1).map((edge, index) => sql`
+        join ${sql.identifier(edge.parent_schema)}.${sql.identifier(edge.parent_table)} ${sql.identifier(`owner_${index + 1}`)}
+          on ${match(edge, `owner_${index}`, `owner_${index + 1}`)}
+      `);
+      const last = path[path.length - 1]!;
+      return sql`exists (
+        select 1 from ${from} ${sql.join(joins, sql` `)}
+        where ${match(first, alias, "owner_0")}
+          and ${sql.identifier(`owner_${path.length - 1}`)}.${sql.identifier(ownershipColumns.get(last.parent_id)!)} ${comparison}
+      )`;
+    }), sql` or `);
+  }
+  for (const reference of references) {
+    // A composite ownership FK already proves equality of company IDs.
+    if (reference.child_has_company && reference.parent_has_company
+      && reference.child_columns.some((column, index) =>
+        column === "company_id" && reference.parent_columns[index] === "company_id")) continue;
+    if (reference.parent_table === "companies" && reference.child_has_company
+      && reference.child_columns.length === 1 && reference.child_columns[0] === "company_id") continue;
+    const parentOwners = ownershipPaths(reference.parent_id);
+    const childOwners = ownershipPaths(reference.child_id, reference.constraint_id);
+    // With no independent ownership path, a child belongs solely to its
+    // referenced parent and cannot represent another company's owned record.
+    if (parentOwners.length === 0 || childOwners.length === 0) continue;
     const rows = await run(tx.execute(sql`
-      select 1 from ${sql.identifier(reference.schema_name)}.${sql.identifier(reference.table_name)} child
-      join ${heartbeatRuns} owned on ${join}
-      where owned.company_id = ${id} and child.company_id <> ${id} limit 1
+      select 1 from ${sql.identifier(reference.child_schema)}.${sql.identifier(reference.child_table)} child
+      join ${sql.identifier(reference.parent_schema)}.${sql.identifier(reference.parent_table)} owned
+        on ${match(reference, "child", "owned")}
+      where (${ownerPredicate(reference.parent_id, "owned", parentOwners, false)})
+        and (${ownerPredicate(reference.child_id, "child", childOwners, true)})
+      limit 1
     `));
     if (rows.length > 0) {
-      throw new AgentLifecycleConflict("Another company references this company's heartbeat runs");
+      throw new AgentLifecycleConflict("Another company references this company's deletion dependencies");
     }
   }
 }
@@ -171,7 +257,12 @@ export async function deleteCompany(db: Db, id: string, options: { signal?: Abor
                 select id from ${heartbeatRuns} where company_id = ${id} for update
               ) locked_runs
             `));
-            await assertCompanyRunBoundary(tx, id, run);
+            await run(tx.execute(sql`
+              select count(*) from (
+                select id from ${issues} where company_id = ${id} for update
+              ) locked_issues
+            `));
+            await assertCompanyDeletionBoundary(tx, id, run);
             await run(notifyDeliveryWork(tx, DELIVERY_QUEUES.skillSourceSync));
             await run(agentObservabilityService(tx as unknown as Db).removeForCompanyDeletion(id));
             // Delete owned NO ACTION dependencies before runs, sessions, secrets,
