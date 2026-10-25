@@ -22,11 +22,23 @@ COPY --from=deployed /app/server/dist/install-copilot-assets.mjs /app/server/dis
 COPY --from=deployed /app/server/dist/materialize-copilot-binary.mjs /app/server/dist/materialize-copilot-binary.mjs
 COPY --from=deployed /app/server/dist/copilot-inner-distribution.mjs /app/server/dist/copilot-inner-distribution.mjs
 # Existing manifests, lockfile, node_modules and compiler binaries come from the immutable base.
-# These commands compile only; this recipe never runs migrations against a database.
-RUN pnpm --filter @paperclipai/db build \
-    && pnpm --filter @paperclipai/server exec tsc \
+# pnpm is only a corepack shim in the runtime image and would download itself, so this offline
+# build calls the same package scripts' compiler commands directly (db build, server tsc,
+# build stamp, runtime bundle). This recipe never runs migrations against a database.
+RUN cd packages/db \
+    && ./node_modules/.bin/tsx src/check-migration-numbering.ts \
+    && ./node_modules/.bin/tsx src/check-migration-safety.ts \
+    && ./node_modules/.bin/tsc \
+    && rm -rf dist/migrations \
+    && mkdir -p dist/migrations/meta \
+    && cp src/migrations/*.sql dist/migrations/ \
+    && cp src/migrations/meta/_journal.json dist/migrations/meta/ \
+    && cd ../../server \
+    && ./node_modules/.bin/tsc \
+    && cd .. \
     && node server/scripts/write-build-stamp.mjs \
-    && pnpm --filter @paperclipai/server build:runtime
+    && cd server \
+    && node scripts/bundle-runtime.mjs
 
 FROM deployed AS production
 ARG PAPERCLIP_BUILD_COMMIT
