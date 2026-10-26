@@ -1,0 +1,5 @@
+# Upgrade omp every 4 hours. Output goes to the container log (PID 1 stdout).
+# Installed to /etc/cron.d/omp-auto-update; started by docker-entrypoint.sh.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 */4 * * * root /usr/local/bin/omp-auto-update.sh >> /proc/1/fd/1 2>&1

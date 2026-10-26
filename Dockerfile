@@ -202,7 +202,7 @@ RUN apt-get update \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
   && apt-get update \
   && apt-get install -y --no-install-recommends \
-    postgresql-client-17 git gh python3 make g++ procps \
+    postgresql-client-17 git gh python3 make g++ procps cron \
   && rm -rf /var/lib/apt/lists/* \
   && test -x /usr/lib/postgresql/17/bin/pg_dump \
   && test -x /usr/lib/postgresql/17/bin/psql
@@ -221,6 +221,16 @@ RUN tmp="$(mktemp -d)" \
 # Run agents with the data-volume home mounted at /home/mja311. usermod -d
 # without -m only repoints the passwd entry; the mount supplies the directory.
 RUN usermod -d /home/mja311 node
+
+# Scheduled omp upgrades: cron runs omp-auto-update.sh every 4 hours as root
+# (agents run as node and cannot write /usr/local/bin). docker-entrypoint.sh
+# starts the cron daemon. The upgrade lives in the container's writable layer,
+# so a recreated container starts at the OMP_VERSION pinned above and catches
+# up at the next tick.
+COPY scripts/omp-auto-update.sh /usr/local/bin/omp-auto-update.sh
+COPY docker/omp-auto-update.cron /etc/cron.d/omp-auto-update
+RUN chmod 0755 /usr/local/bin/omp-auto-update.sh \
+  && chmod 0644 /etc/cron.d/omp-auto-update
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
