@@ -148,5 +148,11 @@ if [ -d "$home_dir" ]; then
     fi
 fi
 
+# Scheduled omp upgrades (/etc/cron.d/omp-auto-update). cron daemonizes itself
+# and tini reaps it. A failed start must not block the app.
+if command -v cron >/dev/null 2>&1; then
+    cron || echo "docker-entrypoint.sh: cron failed to start; omp auto-update disabled" >&2
+fi
+
 log "starting app as node"
 exec gosu node "$@"
