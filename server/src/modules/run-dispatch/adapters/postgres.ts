@@ -131,13 +131,6 @@ async function readNativeReviewParticipantFacts(db: Db, input: {
   } : null;
 }
 
-/** Stop commits `executionCancellation.state = requested` before the fence that
- * writes `cancellation`/`startupCancellation`; dispatch must lose to either. */
-function hasStopIntent(run: Pick<HeartbeatRun, "resultJson">): boolean {
-  return Boolean(run.resultJson?.cancellation || run.resultJson?.startupCancellation ||
-    parseObject(run.resultJson?.executionCancellation).state === "requested");
-}
-
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
@@ -1161,7 +1154,7 @@ export function createPostgresRunDispatchAdapter(
     input: DispatchResolvedInteractionInput<T>,
   ): Promise<DispatchResolvedInteractionOutcome<T>> {
     const dispatchLockedRun = async (tx: Db, run: HeartbeatRun, publications: ActivityPublication[]) => {
-      if (run.status !== input.expectedStatus || hasStopIntent(run)) {
+      if (run.status !== input.expectedStatus || run.resultJson?.cancellation || run.resultJson?.startupCancellation) {
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };
       }
       if (input.enforceContinuationOwnership !== false) {
@@ -1249,7 +1242,7 @@ export function createPostgresRunDispatchAdapter(
     return withRunOwnershipLocks<DispatchResolvedInteractionOutcome<T>>(input, () => ({ dispatched: false as const,
       cancellation: { outcome: "lost_race" as const } }), async (tx, run) => {
       const claim = parseObject(parseObject(run.usageJson).budgetDispatch);
-      if (run.status !== input.expectedStatus || run.costAccountedAt || hasStopIntent(run)
+      if (run.status !== input.expectedStatus || run.costAccountedAt || run.resultJson?.cancellation || run.resultJson?.startupCancellation
         || claim.reservationId !== admission.claim.reservationId || claim.recoveryLeaseOwner !== admission.claim.recoveryLeaseOwner
         || claim.admittedAt !== admission.claim.admittedAt || claim.handedOffAt)
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };

@@ -3679,6 +3679,113 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
   });
 
+  const REASSIGN_CANCEL = { errorCode: "issue_reassigned", suppressImmediateRecovery: true,
+    resultJson: { reassignmentStopConfirmed: true } } as const;
+
+  it("retires the reassignment cancel hold for an omp_local run cancelled before the adapter is entered", async () => {
+    await withTempPaperclipHome(async () => {
+      const { agentId, issueId, runId, companyId } = await seedQueuedIssueRunFixture();
+      await db.update(agents).set({ adapterType: "omp_local", adapterConfig: {} }).where(eq(agents.id, agentId));
+      let holdAtCancel: unknown = null;
+      let heartbeat!: ReturnType<typeof heartbeatService>;
+      const realize = vi.spyOn(workspaceRuntime, "realizeExecutionWorkspace").mockImplementationOnce(async () => {
+        await heartbeat.cancelRun(runId, "Cancelled for task reassignment", REASSIGN_CANCEL);
+        holdAtCancel = await getExecutionBlocker(db, companyId, issueId);
+        throw new Error("workspace realization aborted by cancellation");
+      });
+      try {
+        heartbeat = heartbeatService(db);
+        await heartbeat.resumeQueuedRuns();
+        await heartbeat.drainActiveRunExecutions();
+        expect(realize).toHaveBeenCalled();
+        expect(holdAtCancel).toMatchObject({ runId, cause: "legacy_execution_requires_reconciliation" });
+        expect(mockAdapterExecute).not.toHaveBeenCalled();
+        const [cancelled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+        expect(cancelled).toMatchObject({ status: "cancelled", runtimeMode: "legacy", processPid: null,
+          resultJson: { startupCancellation: { beforeNativeSelection: false },
+            executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } });
+        expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId)))
+          .toMatchObject([{ status: "resolved", outcome: "false_positive", fingerprint: `legacy-execution:${runId}` }]);
+        expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
+      } finally { realize.mockRestore(); }
+    });
+  });
+
+  it("still starts the next queued run and keeps the hold when the unwind receipt write throws", async () => {
+    await withTempPaperclipHome(async () => {
+      const { agentId, issueId, runId, companyId } = await seedQueuedIssueRunFixture();
+      await db.update(agents).set({ adapterType: "omp_local", adapterConfig: {} }).where(eq(agents.id, agentId));
+      const nextRunId = randomUUID();
+      const nextWakeupId = randomUUID();
+      const later = new Date("2026-03-19T00:01:00.000Z");
+      await db.insert(agentWakeupRequests).values({ id: nextWakeupId, companyId, agentId, source: "on_demand",
+        triggerDetail: "manual", reason: "manual", payload: {}, status: "queued", runId: nextRunId, requestedAt: later, updatedAt: later });
+      await db.insert(heartbeatRuns).values({ id: nextRunId, companyId, agentId, invocationSource: "on_demand",
+        triggerDetail: "manual", status: "queued", wakeupRequestId: nextWakeupId, contextSnapshot: {}, updatedAt: later, createdAt: later });
+      // Fail only the executor's unwind-receipt write.
+      const originalUpdate = db.update.bind(db) as (table: unknown) => { set: (v: unknown) => unknown };
+      const update = vi.spyOn(db, "update").mockImplementation(((table: unknown) => {
+        const builder = originalUpdate(table);
+        return { ...builder, set: (values: unknown) => {
+          const mentionsReceipt = (value: unknown, seen = new Set<unknown>()): boolean => {
+            if (typeof value === "string") return value.includes("startupPreparationSettledAt");
+            if (!value || typeof value !== "object" || seen.has(value)) return false;
+            seen.add(value);
+            return (Array.isArray(value) ? value : Object.values(value)).some(entry => mentionsReceipt(entry, seen));
+          };
+          return mentionsReceipt((values as { resultJson?: unknown }).resultJson)
+            ? { where: () => ({ returning: () => Promise.reject(new Error("receipt write failed")) }) }
+            : builder.set(values);
+        } };
+      }) as unknown as typeof db.update);
+      let heartbeat!: ReturnType<typeof heartbeatService>;
+      const realize = vi.spyOn(workspaceRuntime, "realizeExecutionWorkspace").mockImplementationOnce(async () => {
+        await heartbeat.cancelRun(runId, "Cancelled for task reassignment", REASSIGN_CANCEL);
+        throw new Error("workspace realization aborted by cancellation");
+      });
+      try {
+        heartbeat = heartbeatService(db);
+        await heartbeat.resumeQueuedRuns();
+        await heartbeat.drainActiveRunExecutions();
+        expect(realize).toHaveBeenCalled();
+        expect(update).toHaveBeenCalled();
+        const [next] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, nextRunId));
+        expect(next?.status).not.toBe("queued");
+        expect(await getExecutionBlocker(db, companyId, issueId)).toMatchObject({ runId });
+        expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId)))
+          .toMatchObject([{ status: "active", cause: "legacy_execution_requires_reconciliation" }]);
+      } finally { realize.mockRestore(); update.mockRestore(); }
+    });
+  });
+
+  it("keeps the reassignment cancel hold for an omp_local run cancelled after the dispatch gate handed off", async () => {
+    await withTempPaperclipHome(async () => {
+      const { agentId, issueId, runId, companyId } = await seedQueuedIssueRunFixture();
+      await db.update(agents).set({ adapterType: "omp_local", adapterConfig: {} }).where(eq(agents.id, agentId));
+      let handedOffAt: unknown = null;
+      const heartbeat = heartbeatService(db);
+      mockAdapterExecute.mockImplementationOnce(async () => {
+        const [row] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+        handedOffAt = (row?.usageJson as { budgetDispatch?: { handedOffAt?: unknown } } | null)?.budgetDispatch?.handedOffAt;
+        const cancellation = heartbeat.cancelRun(runId, "Cancelled for task reassignment", REASSIGN_CANCEL);
+        void cancellation.catch(() => undefined);
+        await waitForValue(async () => adapterExecutionControls.get(runId)?.controller.signal.aborted);
+        return { exitCode: 1, signal: "SIGTERM", timedOut: false, errorMessage: "Cancelled", errorCode: "cancelled",
+          summary: "Cancelled", provider: "test", model: "test-model" };
+      });
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.drainActiveRunExecutions();
+      expect(mockAdapterExecute).toHaveBeenCalledOnce();
+      expect(handedOffAt).toBeTruthy();
+      const [cancelled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(cancelled?.status).toBe("cancelled");
+      const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
+      expect(actions.some(action => action.outcome === "false_positive")).toBe(false);
+      expect(actions.some(action => action.status === "active")).toBe(true);
+      expect(await getExecutionBlocker(db, companyId, issueId)).not.toBeNull();
+    });
+  });
+
   it("does not dispatch when cancellation wins after native selection", async () => {
     await withTempPaperclipHome(async () => {
       const { agentId, issueId, runId } = await seedQueuedIssueRunFixture();

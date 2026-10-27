@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, environmentLeases, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, issues } from "@paperclipai/db";
+import { agents, companies, createDb, environmentLeases, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import {
   LEGACY_RECOVERY_CAUSE, legacyExecutionNeedsReconciliationWithEvidence, settleCancelledLegacyBeforeDispatch,
   terminalizeLegacyExecution,
 } from "../services/legacy-execution-recovery.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
+import { LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "../services/workspace-restore-recovery-state.js";
 import { settleUnrecoverableExecutions } from "../services/execution-recovery-resolution.js";
 
 // Reassigning a task cancels its active omp_local run before the assignee
@@ -98,9 +99,9 @@ const support = await getEmbeddedPostgresTestSupport();
     ["a recorded process start", async f => { await db.update(heartbeatRuns).set({ processStartedAt: new Date() }).where(eq(heartbeatRuns.id, f.runId)); }],
     ["a provider session", async f => { await db.update(heartbeatRuns).set({ sessionIdAfter: "session-1" }).where(eq(heartbeatRuns.id, f.runId)); }],
     ["an adapter invoke event", async f => { await db.insert(heartbeatRunEvents).values({ companyId: f.companyId, runId: f.runId,
-      agentId: f.agentId, seq: 1, eventType: "adapter.invoke" }); }],
+      agentId: f.agentId, seq: 1000, eventType: "adapter.invoke" }); }],
     ["a provider-sourced event", async f => { await db.insert(heartbeatRunEvents).values({ companyId: f.companyId, runId: f.runId,
-      agentId: f.agentId, seq: 1, eventType: "log", sourceEventId: "provider-event-1" }); }],
+      agentId: f.agentId, seq: 1000, eventType: "log", sourceEventId: "provider-event-1" }); }],
     ["an unreleased environment lease", async f => { await db.insert(environmentLeases).values({ companyId: f.companyId,
       heartbeatRunId: f.runId, provider: "local" }); }],
     ["a failed lease cleanup", async f => { await db.insert(environmentLeases).values({ companyId: f.companyId, heartbeatRunId: f.runId,
@@ -109,6 +110,16 @@ const support = await getEmbeddedPostgresTestSupport();
       heartbeatRunId: f.runId, provider: "sandbox", status: "released", releasedAt: new Date() }); }],
     ["an unrestored workspace", async f => { await db.update(heartbeatRuns).set({ resultJson: { ...(await f.run()).resultJson,
       workspaceRestoreFailure: "restore_unsafe_archive" } }).where(eq(heartbeatRuns.id, f.runId)); }],
+    ["a native finalization row", async f => {
+      await db.update(heartbeatRuns).set({ nativeIssueId: f.issueId }).where(eq(heartbeatRuns.id, f.runId));
+      await db.insert(nativeRunFinalizations).values({ runId: f.runId, companyId: f.companyId,
+      issueId: f.issueId, phase: "running" }); }],
+    ["required workspace recovery on the run", async f => { await db.update(heartbeatRuns).set({ resultJson: { ...(await f.run()).resultJson,
+      workspaceRestoreFailure: "restore_unsafe_archive",
+      workspaceRestoreRecovery: { schema: LEGACY_WORKSPACE_RECOVERY_SCHEMA } } }).where(eq(heartbeatRuns.id, f.runId)); }],
+    ["a workspace restore failure recorded on the hold", async f => { const [action] = await f.actions();
+      await db.update(issueRecoveryActions).set({ evidence: { ...action.evidence, workspaceRestoreFailure: "restore_unsafe_archive" } })
+        .where(eq(issueRecoveryActions.id, action.id)); }],
     ["an exhausted retry budget", async f => { await db.update(heartbeatRuns).set({ scheduledRetryAttempt: 2 }).where(eq(heartbeatRuns.id, f.runId)); }],
     ["a board reconciliation decision", async f => { const [action] = await f.actions();
       await db.update(issueRecoveryActions).set({ evidence: { ...action.evidence, executionReconciliation: { runId: f.runId } } })
