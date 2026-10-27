@@ -16,7 +16,7 @@
   runner, which defeated the runner's inherited-env filter, so any agent that ran
   `env` could read `PAPERCLIP_AGENT_JWT_SECRET` (which signs every agent's token)
   plus the server's psql/pg_dump paths. The merge now starts from
-  `sanitizeInheritedPaperclipEnv(process.env)`; per-run Paperclip variables and the
+  `sanitizeInheritedPaperclipEnv(process.env)` in the run, `omp models --json` discovery, and the environment test (including its hello probe); per-run Paperclip variables and the
   agent's own configured env are unchanged and still win.
 
 ## 0.1.0
