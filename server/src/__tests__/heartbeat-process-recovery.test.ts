@@ -3647,6 +3647,38 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
   });
 
+  it("retires the reassignment cancel hold when a legacy executor unwinds before dispatch", async () => {
+    await withTempPaperclipHome(async () => {
+      const { agentId, issueId, runId, companyId } = await seedQueuedIssueRunFixture();
+      await db.update(agents).set({ adapterType: "paperclip_runner",
+        adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+      }).where(eq(agents.id, agentId));
+      const factory = vi.fn(() => { throw new Error("provider must not start"); });
+      let holdAtCancel: unknown = null;
+      const heartbeat = heartbeatService(db, {
+        nativeSessionBackendFactory: factory,
+        beforeNativeRuntimeSelection: async id => {
+          // The reassign route stops the run before changing its assignee.
+          await heartbeat.cancelRun(id, "Cancelled for task reassignment", { errorCode: "issue_reassigned", suppressImmediateRecovery: true });
+          holdAtCancel = await getExecutionBlocker(db, companyId, issueId);
+        },
+      });
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.drainActiveRunExecutions();
+      expect(holdAtCancel).toMatchObject({ runId, cause: "legacy_execution_requires_reconciliation" });
+      expect(factory).not.toHaveBeenCalled();
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      const [cancelled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(cancelled).toMatchObject({ status: "cancelled", errorCode: "issue_reassigned", runtimeMode: "legacy",
+        resultJson: { startupPreparationSettledAt: expect.any(String),
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+      });
+      expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId)))
+        .toMatchObject([{ status: "resolved", outcome: "false_positive", fingerprint: `legacy-execution:${runId}` }]);
+      expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
+    });
+  });
+
   it("does not dispatch when cancellation wins after native selection", async () => {
     await withTempPaperclipHome(async () => {
       const { agentId, issueId, runId } = await seedQueuedIssueRunFixture();

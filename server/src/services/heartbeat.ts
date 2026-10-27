@@ -275,6 +275,7 @@ import {
 } from "./conversation-continuation.js";
 
 import {
+  settleCancelledLegacyBeforeDispatch,
   settleInterruptedNativeBootstrap,
 } from "./legacy-execution-recovery.js";
 import {
@@ -3840,16 +3841,29 @@ export function heartbeatService(
             providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
           }) ?? latestRun;
         }
+        // A legacy adapter that never entered dispatch has the same exact-executor
+        // unwind proof. The flags die with this process, so a restart keeps any hold.
+        const legacyUnwoundBeforeDispatch = latestRun?.runtimeMode === "legacy" && !legacyAdapterEntered;
         if (latestRun?.status === "cancelled" && !nativeDispatchStarted && !nativeOwnershipHeld &&
-            (latestRun.runtimeMode === "native" ||
+            (latestRun.runtimeMode === "native" || legacyUnwoundBeforeDispatch ||
               parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true)) {
           // This executor has finished preparation and lease cleanup without
           // handing off to native execution. Keep a durable receipt for admission
           // after a restart; cleanup receipts are independently rechecked there.
-          await db.update(heartbeatRuns).set({
+          const [receipt] = await db.update(heartbeatRuns).set({
             resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
               ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
-          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
+          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled"))).returning();
+          if (receipt && legacyUnwoundBeforeDispatch) {
+            // Retire the cancel-time reconciliation hold only on proof that no
+            // provider was reached; every other case keeps it for attestation.
+            latestRun = await settleCancelledLegacyBeforeDispatch(db, { run: receipt,
+              providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
+            }).catch(error => {
+              logger.warn({ err: error, runId: run.id }, "failed to retire pre-dispatch legacy cancellation hold");
+              return null;
+            }) ?? latestRun;
+          }
         }
         if (latestRun?.runtimeMode === "native" && isHeartbeatRunTerminalStatus(latestRun.status) &&
             !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled && !nativeOwnershipHeld) {

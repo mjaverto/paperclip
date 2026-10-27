@@ -55,12 +55,21 @@ export async function isCancelledNativeStartup(db: Db, run: Run, coordinator: Co
   const leases = await db.select().from(environmentLeases).where(and(
     eq(environmentLeases.companyId, run.companyId), eq(environmentLeases.heartbeatRunId, run.id),
   ));
-  if ((!settled && leases.length === 0 && !historicalBeforeSelection) || leases.some(lease =>
+  if ((!settled && leases.length === 0 && !historicalBeforeSelection) || hasUnsettledEnvironmentLease(leases)) return false;
+  return !(await hasDispatchSideEvent(db, run));
+}
+
+/** A local lease needs a completed release; a remote one needs its termination receipt. */
+export function hasUnsettledEnvironmentLease(leases: Array<typeof environmentLeases.$inferSelect>) {
+  return leases.some(lease =>
     lease.provider === "local"
       ? !lease.releasedAt || lease.status === "pending_cleanup" || lease.cleanupStatus === "failed"
-      : !hasRemoteTerminationReceipt(lease))) return false;
-  // Reject contradictory retained evidence, including a crash after a launch
-  // request but before the PID callback. Provider events never certify a stop.
+      : !hasRemoteTerminationReceipt(lease));
+}
+
+/** Reject contradictory retained evidence, including a crash after a launch
+ * request but before the PID callback. Provider events never certify a stop. */
+export async function hasDispatchSideEvent(db: Db, run: Pick<Run, "id" | "companyId">) {
   const [execution] = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents).where(and(
     eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id),
     or(isNotNull(heartbeatRunEvents.sourceEventId),
@@ -68,5 +77,5 @@ export async function isCancelledNativeStartup(db: Db, run: Run, coordinator: Co
         "harness.ready", "session.started", "session.resumed", "session.updated", "turn.started",
         "provider.event", "provider.rpc_result", "tool.execution.started"])),
   )).limit(1);
-  return !execution;
+  return Boolean(execution);
 }

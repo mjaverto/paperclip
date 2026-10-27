@@ -719,6 +719,24 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     expect(dispatch).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["a requested stop that has not yet written its cancellation fence", { executionCancellation: { state: "requested", requestedAt: new Date().toISOString() } }],
+    ["a committed cancellation fence", { cancellation: { requestedAt: new Date().toISOString() } }],
+    ["a committed startup cancellation fence", { startupCancellation: { requestedAt: new Date().toISOString() } }],
+  ])("never hands off to the provider after %s", async (_label, resultJson) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const runId = await seedRun({ companyId, agentId, status: "running" });
+    // Admission reserved budget before the stop landed; only the final gate can still refuse.
+    const reservation = await reserveRunBudget(db, companyId, runId, null);
+    await db.update(heartbeatRuns).set({ resultJson }).where(eq(heartbeatRuns.id, runId));
+    const dispatch = vi.fn(async () => "must not run");
+    expect(await createPostgresRunDispatchAdapter(db).dispatchResolvedInteractionIfCurrent({ companyId, runId,
+      reservationId: reservation.id, expectedStatus: "running", now: new Date(), dispatch }))
+      .toEqual({ dispatched: false, cancellation: { outcome: "lost_race" } });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0].usageJson?.budgetDispatch).toBeUndefined();
+  });
+
   it.each(["charge", "budget reduction"] as const)("rechecks a late %s after ordinary run preparation before any provider handoff", async change => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const runId = await seedRun({ companyId, agentId, status: "running" });

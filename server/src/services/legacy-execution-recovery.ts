@@ -16,6 +16,8 @@ import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { logActivity } from "./activity-log.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 import { issueService } from "./issues.js";
+import { hasDispatchSideEvent, hasUnsettledEnvironmentLease } from "./cancelled-native-startup.js";
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
@@ -237,6 +239,18 @@ export async function terminalizeLegacyExecution(input: {
           ),
         )).limit(1);
       if (reconciled) return updated;
+      // A resolved verdict for this exact run is final. Re-entry from the
+      // stranded-work sweeps must not mint a second action for its fingerprint,
+      // whether a board user, the automatic no-replay disposition, or the
+      // pre-dispatch retirement below recorded it.
+      const [decided] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+        eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.sourceIssueId, task.id),
+        eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE), eq(issueRecoveryActions.fingerprint, `legacy-execution:${run.id}`),
+        eq(issueRecoveryActions.status, "resolved"), sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
+        or(eq(issueRecoveryActions.outcome, "false_positive"), and(eq(issueRecoveryActions.outcome, "blocked"),
+          sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`)),
+      )).limit(1);
+      if (decided) return updated;
       await issueRecoveryActionService(tx as unknown as Db).upsertSourceScoped({
         companyId: run.companyId,
         sourceIssueId: task.id,
@@ -291,18 +305,7 @@ export async function settleInterruptedNativeBootstrap(
       or(isNull(environmentLeases.releasedAt), eq(environmentLeases.status, "pending_cleanup"), eq(environmentLeases.cleanupStatus, "failed")),
     )).limit(1);
     if (native || lease) return null;
-    const holds = await tx.select().from(issueRecoveryActions).where(and(
-      eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.sourceIssueId, task.id),
-      eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE), eq(issueRecoveryActions.fingerprint, `legacy-execution:${run.id}`),
-      sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
-      sql`not (${issueRecoveryActions.evidence} ? 'executionReconciliation')`,
-      sql`coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') <> 'restore_unsafe_archive'`,
-      or(inArray(issueRecoveryActions.status, ["active", "escalated"]), and(
-        eq(issueRecoveryActions.status, "resolved"), eq(issueRecoveryActions.outcome, "blocked"),
-        sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'policy' = 'preserve_without_replay_v1'`,
-        sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
-      )),
-    )).for("update");
+    const holds = await lockRetirableLegacyHolds(tx as unknown as Db, run, task.id);
     const ownedBlock = holds.map(hold => hold.evidence.nativeBootstrapFailureBlock as Record<string, unknown> | undefined)
       .find(receipt => receipt?.runId === run.id && receipt.statusVersion === task.statusVersion &&
         ["todo", "in_progress", "in_review"].includes(String(receipt.previousStatus)));
@@ -317,17 +320,94 @@ export async function settleInterruptedNativeBootstrap(
     const [settled] = await tx.update(heartbeatRuns).set({ resultJson: { ...run.resultJson,
       executionRecovery: { kind: "bootstrap", providerWorkStarted: false, preparationSettledAt: now.toISOString() },
     }, updatedAt: now }).where(eq(heartbeatRuns.id, run.id)).returning();
-    const resolved = holds.length ? await tx.update(issueRecoveryActions).set({ status: "resolved", outcome: "false_positive",
-      resolutionNote: "The interrupted executor finished preparation and cleanup without starting a provider.",
-      resolvedAt: now, updatedAt: now,
-      // An automatic disposition may already have resolved the incident but
-      // left replay blocked. Preserve its history while correcting that verdict.
-      evidence: sql`jsonb_set(${issueRecoveryActions.evidence}, '{automaticRecovery,replay}', '"allowed"'::jsonb, false) ||
-        ${JSON.stringify({ bootstrapPreparationSettledAt: now.toISOString() })}::jsonb`,
-    }).where(inArray(issueRecoveryActions.id, holds.map(hold => hold.id))).returning({ id: issueRecoveryActions.id }) : [];
+    const resolved = await resolveLegacyHoldsAsFalsePositive(tx as unknown as Db, holds, now,
+      "The interrupted executor finished preparation and cleanup without starting a provider.");
     if (resolved.length) await logActivity(tx as unknown as Db, { companyId: run.companyId, actorType: "system", actorId: "system",
       action: "issue.recovery_action_resolved", entityType: "issue", entityId: task.id, agentId: run.agentId, runId: run.id,
       details: { reason: "native_bootstrap_stopped_before_provider", recoveryActionIds: resolved.map(r => r.id) },
+    });
+    return settled;
+  });
+}
+
+/** Hold rows this run's reconciliation hold may be: active, escalated, or an
+ * automatic no-replay disposition. A board verdict (executionReconciliation) and
+ * unsafe-archive restore holds are never retired. Caller holds the task and run locks. */
+async function lockRetirableLegacyHolds(db: Db, run: Run, taskId: string) {
+  return db.select().from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.sourceIssueId, taskId),
+    eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE), eq(issueRecoveryActions.fingerprint, `legacy-execution:${run.id}`),
+    sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
+    sql`not (${issueRecoveryActions.evidence} ? 'executionReconciliation')`,
+    sql`coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') <> 'restore_unsafe_archive'`,
+    or(inArray(issueRecoveryActions.status, ["active", "escalated"]), and(
+      eq(issueRecoveryActions.status, "resolved"), eq(issueRecoveryActions.outcome, "blocked"),
+      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'policy' = 'preserve_without_replay_v1'`,
+      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+    )),
+  )).for("update");
+}
+
+async function resolveLegacyHoldsAsFalsePositive(
+  db: Db, holds: Array<typeof issueRecoveryActions.$inferSelect>, now: Date, resolutionNote: string,
+) {
+  if (!holds.length) return [];
+  await notifyDeliveryWork(db, DELIVERY_QUEUES.executionDisposition);
+  await notifyDeliveryWork(db, DELIVERY_QUEUES.executionContinuation);
+  return db.update(issueRecoveryActions).set({ status: "resolved", outcome: "false_positive",
+    resolutionNote, resolvedAt: now, updatedAt: now,
+    // An automatic disposition may already have resolved the incident but
+    // left replay blocked. Preserve its history while correcting that verdict.
+    evidence: sql`jsonb_set(${issueRecoveryActions.evidence}, '{automaticRecovery,replay}', '"allowed"'::jsonb, false) ||
+      ${JSON.stringify({ bootstrapPreparationSettledAt: now.toISOString() })}::jsonb`,
+  }).where(inArray(issueRecoveryActions.id, holds.map(hold => hold.id))).returning({ id: issueRecoveryActions.id });
+}
+
+/** Retire the hold that cancel-time fencing creates for a run whose executor
+ * unwound without ever reaching the provider. Called only by that exact
+ * executor's finally block, after its preparation and cleanup settled.
+ *
+ * A null PID, an empty log, a missing session or `beforeNativeSelection` are NOT
+ * proof: every gate below must hold or the hold stays for a board attestation.
+ * Any restart loses `providerDispatchStarted`'s source, so it keeps the hold. */
+export async function settleCancelledLegacyBeforeDispatch(
+  db: Db, input: { run: Run; providerDispatchStarted: boolean },
+): Promise<Run | null> {
+  if (input.providerDispatchStarted) return null;
+  const issueId = input.run.nativeIssueId ?? input.run.issueId ??
+    (typeof input.run.contextSnapshot?.issueId === "string" ? input.run.contextSnapshot.issueId : null);
+  if (!issueId) return null;
+  return db.transaction(async tx => {
+    const txDb = tx as unknown as Db;
+    const [task] = await tx.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, input.run.companyId))).for("update");
+    const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.run.id), eq(heartbeatRuns.companyId, input.run.companyId))).for("update");
+    if (!task || !run || run.runtimeMode !== "legacy" || run.status !== "cancelled" ||
+        // The cancellation fence must be committed: the dispatch gate refuses on it
+        // and writes handedOffAt, under the run lock, before the adapter can start.
+        !(run.resultJson?.cancellation || run.resultJson?.startupCancellation) ||
+        (run.usageJson?.budgetDispatch as Record<string, unknown> | undefined)?.handedOffAt ||
+        // Only the exact executor writes this receipt, and only after unwinding.
+        typeof run.resultJson?.startupPreparationSettledAt !== "string" ||
+        run.processPid || run.processGroupId || run.processStartedAt || run.sessionIdAfter ||
+        hasWorkspaceRestoreFailure(run.resultJson) || hasRequiredWorkspaceRecovery(run.resultJson) ||
+        executionFailureRetryCount(run) >= 2) return null;
+    const [native] = await tx.select({ id: nativeRunFinalizations.runId }).from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, run.id)).limit(1);
+    if (native) return null;
+    const leases = await tx.select().from(environmentLeases).where(and(
+      eq(environmentLeases.companyId, run.companyId), eq(environmentLeases.heartbeatRunId, run.id),
+    ));
+    if (hasUnsettledEnvironmentLease(leases) || await hasDispatchSideEvent(txDb, run)) return null;
+    const holds = await lockRetirableLegacyHolds(txDb, run, task.id);
+    if (!holds.length) return null;
+    const now = new Date();
+    const [settled] = await tx.update(heartbeatRuns).set({ resultJson: { ...run.resultJson,
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false, preparationSettledAt: now.toISOString() },
+    }, updatedAt: now }).where(eq(heartbeatRuns.id, run.id)).returning();
+    const resolved = await resolveLegacyHoldsAsFalsePositive(txDb, holds, now,
+      "The cancelled executor unwound before provider dispatch: the cancellation fence committed before the dispatch gate, no provider, process, session or dispatch event exists, and its leases were released.");
+    await logActivity(txDb, { companyId: run.companyId, actorType: "system", actorId: "system",
+      action: "issue.recovery_action_resolved", entityType: "issue", entityId: task.id, agentId: run.agentId, runId: run.id,
+      details: { reason: "legacy_cancelled_before_provider_dispatch", recoveryActionIds: resolved.map(r => r.id) },
     });
     return settled;
   });
