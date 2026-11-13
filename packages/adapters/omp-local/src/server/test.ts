@@ -14,6 +14,7 @@ import {
   ensureAdapterExecutionTargetCommandResolvable,
   maybeRunSandboxInstallCommand,
   ensureAdapterExecutionTargetDirectory,
+  isAdapterExecutionTargetUnavailableError,
   runAdapterExecutionTargetProcess,
   describeAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
@@ -102,6 +103,7 @@ export async function testEnvironment(
   } catch (err) {
     checks.push({
       code: "omp_cwd_invalid",
+      ...(isAdapterExecutionTargetUnavailableError(err) ? { retryable: true } : {}),
       level: "error",
       message: err instanceof Error ? err.message : "Invalid working directory",
       detail: cwd,
@@ -143,6 +145,7 @@ export async function testEnvironment(
     } catch (err) {
       checks.push({
         code: "omp_command_unresolvable",
+        ...(isAdapterExecutionTargetUnavailableError(err) ? { retryable: true } : {}),
         level: "error",
         message: err instanceof Error ? err.message : "Command is not executable",
         detail: command,
