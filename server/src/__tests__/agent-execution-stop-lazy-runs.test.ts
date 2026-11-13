@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, applyPendingMigrations, closeRegisteredClients, companies, createDb, heartbeatRunEvents, heartbeatRuns, type Db } from "@paperclipai/db";
+import { agents, applyPendingMigrations, closeRegisteredClients, companies, createDb, heartbeatRunEvents, heartbeatRuns, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import { agentExecutionsHaveStopped } from "../services/agent-execution-stop.js";
@@ -12,32 +12,57 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
 
 const TERMINAL_RUNS = 8;
 const BLOB = "x".repeat(2 * 1024 * 1024);
+const HEAVY_COLUMNS = ["resultJson", "contextSnapshot", "runnerProfileJson"] as const;
 interface Fixture { company: { id: string }; agent: { id: string } }
 const LOCAL_PROCESS_STOPPED = "native.local_process_stopped";
 
-/** Counts `select().from(heartbeat_runs)` calls that read every column. */
-function withFullRunSelectCounter(db: Db) {
-  const counter = { fullRunSelects: 0 };
-  const proxy = new Proxy(db, {
-    get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver);
-      if (property !== "select") return typeof value === "function" ? value.bind(target) : value;
-      return (...selectArgs: unknown[]) => {
-        const builder = (value as (...args: unknown[]) => { from: (table: unknown) => unknown }).call(target, ...selectArgs);
-        return new Proxy(builder, {
-          get(builderTarget, builderProperty) {
-            const member = Reflect.get(builderTarget, builderProperty, builderTarget);
-            if (builderProperty !== "from") return typeof member === "function" ? member.bind(builderTarget) : member;
-            return (table: unknown) => {
-              if (table === heartbeatRuns && selectArgs.length === 0) counter.fullRunSelects += 1;
-              return (member as (table: unknown) => unknown).call(builderTarget, table);
-            };
-          },
-        });
-      };
+/**
+ * Counts result rows that carry a heavy run column, whatever query shape read
+ * them (full select, widened projection, reload-all-then-find). Chain methods
+ * and transactions are re-wrapped so nested queries are measured as well.
+ */
+function withHeavyRowCounter(db: Db) {
+  const counter = { heavyRows: 0 };
+  const isHeavyRow = (row: unknown) => typeof row === "object" && row !== null &&
+    HEAVY_COLUMNS.some(column => column in row);
+  // Builder methods return `this` or a fresh builder (`from`); wrap both so every later link stays measured.
+  const isBuilder = (value: unknown): value is object => typeof value === "object" && value !== null &&
+    (typeof (value as { then?: unknown }).then === "function" || typeof (value as { from?: unknown }).from === "function");
+  const wrapBuilder = (builder: object): object => {
+    const wrapped: object = new Proxy(builder, {
+      get(target, property) {
+        const member = Reflect.get(target, property, target);
+        if (typeof member !== "function") return member;
+        if (property === "then") {
+          return (onFulfilled?: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+            (member as PromiseLike<unknown>["then"]).call(target, (rows: unknown) => {
+              if (Array.isArray(rows)) counter.heavyRows += rows.filter(isHeavyRow).length;
+              return rows;
+            }).then(onFulfilled, onRejected);
+        }
+        return (...args: unknown[]) => {
+          const result = (member as (...a: unknown[]) => unknown).apply(target, args);
+          return result === target ? wrapped : isBuilder(result) ? wrapBuilder(result) : result;
+        };
+      },
+    });
+    return wrapped;
+  };
+  const wrapDb = (target: Db): Db => new Proxy(target, {
+    get(inner, property) {
+      const member = Reflect.get(inner, property, inner);
+      if (typeof member !== "function") return member;
+      if (property === "select" || property === "selectDistinct" || property === "selectDistinctOn") {
+        return (...args: unknown[]) => wrapBuilder((member as (...a: unknown[]) => object).apply(inner, args));
+      }
+      if (property === "transaction") {
+        return (callback: (tx: Db) => unknown, ...rest: unknown[]) =>
+          (member as (...a: unknown[]) => unknown).call(inner, (tx: Db) => callback(wrapDb(tx)), ...rest);
+      }
+      return member.bind(inner);
     },
-  }) as Db;
-  return { db: proxy, counter };
+  });
+  return { db: wrapDb(db), counter };
 }
 
 (support.supported ? describe : describe.skip)("agent execution stop check loads heavy run columns lazily", () => {
@@ -72,27 +97,28 @@ function withFullRunSelectCounter(db: Db) {
     return run;
   }
 
+  /** `heavyRows` is how many run rows carrying result/context/runner-profile JSON the check read back. */
   async function check(f: Fixture) {
-    const spied = withFullRunSelectCounter(db);
+    const spied = withHeavyRowCounter(db);
     const stopped = await agentExecutionsHaveStopped(spied.db, [f.agent.id]);
-    return { stopped, fullRunSelects: spied.counter.fullRunSelects };
+    return { stopped, heavyRows: spied.counter.heavyRows };
   }
 
-  it("reports an agent whose runs are all terminal as stopped without reading any full run row", async () => {
+  it("reports an agent whose runs are all terminal as stopped without reading any heavy run row", async () => {
     const f = await fixture();
-    expect(await check(f)).toEqual({ stopped: true, fullRunSelects: 0 });
+    expect(await check(f)).toEqual({ stopped: true, heavyRows: 0 });
   });
 
   it("is not stopped while a run is still running", async () => {
     const f = await fixture();
     await addRun(f, { status: "running", finishedAt: null });
-    expect(await check(f)).toEqual({ stopped: false, fullRunSelects: 0 });
+    expect(await check(f)).toEqual({ stopped: false, heavyRows: 0 });
   });
 
   it("is not stopped while a terminal run holds a future controller lease", async () => {
     const f = await fixture();
     await addRun(f, { status: "failed", controllerLeaseExpiresAt: new Date(Date.now() + 60_000) });
-    expect(await check(f)).toEqual({ stopped: false, fullRunSelects: 0 });
+    expect(await check(f)).toEqual({ stopped: false, heavyRows: 0 });
   });
 
   it("is not stopped while a terminal run's recorded process is alive", async () => {
@@ -100,31 +126,48 @@ function withFullRunSelectCounter(db: Db) {
     const startedAt = await readProcessStartedAt(process.pid).catch(() => null);
     await addRun(f, { status: "failed", processPid: process.pid, processGroupId: null,
       processStartedAt: startedAt ? new Date(startedAt) : null });
-    expect(await check(f)).toEqual({ stopped: false, fullRunSelects: 0 });
+    expect(await check(f)).toEqual({ stopped: false, heavyRows: 0 });
   });
 
   it("holds a cancelled legacy run that used a conversation adapter until its cancellation is acknowledged", async () => {
     const f = await fixture();
     const run = await addRun(f, { resultJson: { blob: BLOB }, runnerProfileJson: { adapterDispatch: { adapterType: "claude_local" } } });
-    // Only the one candidate run is read in full, however many terminal runs the agent has.
-    expect(await check(f)).toEqual({ stopped: false, fullRunSelects: 1 });
+    // Exactly the one candidate run is read in full, however many terminal runs the agent has.
+    expect(await check(f)).toEqual({ stopped: false, heavyRows: 1 });
     await db.update(heartbeatRuns).set({ resultJson: { blob: BLOB, executionCancellation: { state: "acknowledged" } } })
       .where(eq(heartbeatRuns.id, run.id));
-    expect(await check(f)).toEqual({ stopped: true, fullRunSelects: 0 });
+    expect(await check(f)).toEqual({ stopped: true, heavyRows: 0 });
+  });
+
+  it("still holds a conversation-adapter run whose cancellation is requested but not acknowledged", async () => {
+    const f = await fixture();
+    await addRun(f, { resultJson: { blob: BLOB, executionCancellation: { state: "requested" } },
+      runnerProfileJson: { adapterDispatch: { adapterType: "claude_local" } } });
+    expect(await check(f)).toEqual({ stopped: false, heavyRows: 1 });
   });
 
   it("accepts a settled cancelled legacy run that never used a conversation adapter", async () => {
     const f = await fixture();
     await addRun(f, { resultJson: { blob: BLOB }, runnerProfileJson: { adapterDispatch: { adapterType: "http" } } });
-    expect(await check(f)).toEqual({ stopped: true, fullRunSelects: 1 });
+    expect(await check(f)).toEqual({ stopped: true, heavyRows: 1 });
   });
 
   it("holds a cancelled native run without process identity or stop receipt, and accepts it once stopped", async () => {
     const f = await fixture();
     const run = await addRun(f, { runtimeMode: "native", resultJson: { blob: BLOB } });
-    expect(await check(f)).toEqual({ stopped: false, fullRunSelects: 1 });
+    expect(await check(f)).toEqual({ stopped: false, heavyRows: 1 });
     await db.insert(heartbeatRunEvents).values({ companyId: f.company.id, agentId: f.agent.id, runId: run.id,
       seq: 1, eventType: LOCAL_PROCESS_STOPPED });
-    expect(await check(f)).toEqual({ stopped: true, fullRunSelects: 0 });
+    expect(await check(f)).toEqual({ stopped: true, heavyRows: 0 });
+  });
+
+  it("accepts a cancelled native startup that never claimed a runner, judged on the hydrated row", async () => {
+    const f = await fixture();
+    const [issue] = await db.insert(issues).values({ companyId: f.company.id, title: "Never claimed" }).returning();
+    const run = await addRun(f, { runtimeMode: "native", executionStage: null, nativeIssueId: issue.id,
+      resultJson: { blob: BLOB, startupPreparationSettledAt: "2000-01-01T00:00:01.000Z" } });
+    await db.insert(nativeRunFinalizations).values({ companyId: f.company.id, runId: run.id, issueId: issue.id, phase: "observed" });
+    // isCancelledNativeStartup reads resultJson; a column-limited row would wrongly hold the pause.
+    expect(await check(f)).toEqual({ stopped: true, heavyRows: 1 });
   });
 });
