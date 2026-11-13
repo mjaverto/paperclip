@@ -18,7 +18,8 @@ export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
     processGroupId: heartbeatRuns.processGroupId, processStartedAt: heartbeatRuns.processStartedAt,
     runtimeMode: heartbeatRuns.runtimeMode, startedAt: heartbeatRuns.startedAt,
     executionStage: heartbeatRuns.executionStage,
-    cancellationState: sql<string | null>`${heartbeatRuns.resultJson}->'executionCancellation'->>'state'`,
+    // Extracted only where the legacy cancelled branch reads it, so Postgres never detoasts result_json for other runs.
+    cancellationState: sql<string | null>`case when ${heartbeatRuns.status} = 'cancelled' and ${heartbeatRuns.runtimeMode} = 'legacy' then ${heartbeatRuns.resultJson}->'executionCancellation'->>'state' end`,
   }).from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
   const loadFullRun = async (runId: string) =>
     (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).limit(1))[0];
