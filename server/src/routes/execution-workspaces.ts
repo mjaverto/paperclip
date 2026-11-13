@@ -39,6 +39,7 @@ import {
   type WorkspaceRuntimeLeaseClaim,
 } from "../services/index.js";
 import { mergeExecutionWorkspaceConfig, readExecutionWorkspaceConfig } from "../services/execution-workspaces.js";
+import { omitServerDatabaseCredentialEnv } from "../services/runtime-service-env.js";
 import { parseProjectExecutionWorkspacePolicy } from "../services/execution-workspace-policy.js";
 import { readProjectWorkspaceRuntimeConfig } from "../services/project-workspace-runtime-config.js";
 import {
@@ -772,7 +773,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
             ], {
               cwd: baseWorkspaceCwd,
               env: {
-                ...process.env,
+                ...omitServerDatabaseCredentialEnv(process.env),
                 PAPERCLIP_SEED_EXPECTED_COMPANY_ID: existing.companyId,
                 PAPERCLIP_WORKSPACE_BASE_CWD: baseWorkspaceCwd,
                 PAPERCLIP_PROJECT_WORKSPACE_ID: existing.projectWorkspaceId ?? "",

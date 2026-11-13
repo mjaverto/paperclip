@@ -6,7 +6,7 @@ import { savedGitWorkspaceRestoration, ensureSavedGitCommit, GitCacheRestoration
 import { applyGitRestorePointToWorktree, ensureGitRestorePointCommit } from "./git-restore-point-storage.js";
 import { getStorageService } from "../storage/index.js";
 import type { StorageService } from "../storage/types.js";
-import { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
+import { omitServerDatabaseCredentialEnv, sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
 import { verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspace-source.js";
 import { assertCurrentWorkspaceSourceHeld, workspaceSourceIdentities, withWorkspaceSourceLocks } from "./workspace-source-lock.js";
 import { localWorkspaceSourcePaths } from "./execution-workspace-source-roots.js";
@@ -3047,7 +3047,7 @@ function buildWorkspaceCommandEnv(input: {
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
 }) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = omitServerDatabaseCredentialEnv(process.env);
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;

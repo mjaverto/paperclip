@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseEnvContents } from "dotenv";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -466,6 +466,7 @@ afterEach(async () => {
   delete process.env.PAPERCLIP_INSTANCE_ID;
   delete process.env.PAPERCLIP_WORKTREES_DIR;
   delete process.env.DATABASE_URL;
+  delete process.env.DATABASE_MIGRATION_URL;
   await resetRuntimeServicesForTests();
   // Registry reset does not clear the process-local allocation claims. A
   // failed-start fixture must not reserve another test's ephemeral port.
@@ -1895,6 +1896,85 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
     });
 
     await expect(fs.readFile(path.join(reused.cwd, ".paperclip-provision-created"), "utf8")).resolves.toBe("false\n");
+  });
+
+  describe("provision command database credentials", () => {
+    async function provisionDumpingEnv(command: (script: string) => string) {
+      const repoRoot = await createTempRepo();
+      await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
+      await fs.writeFile(
+        path.join(repoRoot, "scripts", "dump-env.sh"),
+        [
+          "#!/usr/bin/env bash",
+          "set -euo pipefail",
+          "{",
+          "  printf 'DATABASE_URL=%s\\n' \"${DATABASE_URL-<unset>}\"",
+          "  printf 'DATABASE_MIGRATION_URL=%s\\n' \"${DATABASE_MIGRATION_URL-<unset>}\"",
+          "  printf 'database_url=%s\\n' \"${database_url-<unset>}\"",
+          "  printf 'PATH=%s\\n' \"${PATH-<unset>}\"",
+          "  printf 'UNRELATED_AMBIENT=%s\\n' \"${UNRELATED_AMBIENT-<unset>}\"",
+          "  printf 'PAPERCLIP_HOME=%s\\n' \"${PAPERCLIP_HOME-<unset>}\"",
+          "  printf 'PAPERCLIP_WORKSPACE_BRANCH=%s\\n' \"${PAPERCLIP_WORKSPACE_BRANCH-<unset>}\"",
+          "  printf 'PAPERCLIP_WORKSPACE_BASE_CWD=%s\\n' \"${PAPERCLIP_WORKSPACE_BASE_CWD-<unset>}\"",
+          "} > .paperclip-provision-env",
+        ].join("\n"),
+        "utf8",
+      );
+      await runGit(repoRoot, ["add", "scripts/dump-env.sh"]);
+      await runGit(repoRoot, ["commit", "-m", "Add env dumping provision script"]);
+
+      vi.stubEnv("DATABASE_URL", "postgres://paperclip:ambient-secret@db/paperclip");
+      vi.stubEnv("DATABASE_MIGRATION_URL", "postgres://migrator:ambient-secret@db/paperclip");
+      vi.stubEnv("database_url", "postgres://paperclip:ambient-lowercase-secret@db/paperclip");
+      vi.stubEnv("UNRELATED_AMBIENT", "inherited");
+      vi.stubEnv("PAPERCLIP_HOME", "/server/paperclip-home");
+      try {
+        const workspace = await realizeExecutionWorkspace({
+          base: {
+            baseCwd: repoRoot,
+            source: "project_primary",
+            projectId: "project-1",
+            workspaceId: "workspace-1",
+            repoUrl: null,
+            repoRef: "HEAD",
+          },
+          config: {
+            workspaceStrategy: {
+              type: "git_worktree",
+              branchTemplate: "{{issue.identifier}}-{{slug}}",
+              provisionCommand: command("./scripts/dump-env.sh"),
+            },
+          },
+          issue: { id: "issue-1", identifier: "PAP-650", title: "Dump provision env" },
+          agent: { id: "agent-1", name: "Codex Coder", companyId: "company-1" },
+        });
+        const dump = await fs.readFile(path.join(workspace.cwd, ".paperclip-provision-env"), "utf8");
+        return { repoRoot, env: Object.fromEntries(dump.trimEnd().split("\n").map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        })) as Record<string, string> };
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    }
+
+    it("keeps the server's ambient database URLs out of the provision command but keeps PATH and PAPERCLIP_* variables", async () => {
+      const { repoRoot, env } = await provisionDumpingEnv((script) => `bash ${script}`);
+      expect(env.DATABASE_URL).toBe("<unset>");
+      expect(env.DATABASE_MIGRATION_URL).toBe("<unset>");
+      expect(env.database_url).toBe("<unset>");
+      expect(env.PATH).toBe(process.env.PATH);
+      expect(env.UNRELATED_AMBIENT).toBe("inherited");
+      expect(env.PAPERCLIP_HOME).toBe("/server/paperclip-home");
+      expect(env.PAPERCLIP_WORKSPACE_BRANCH).toBe("PAP-650-dump-provision-env");
+      expect(env.PAPERCLIP_WORKSPACE_BASE_CWD).toBe(repoRoot);
+    });
+
+    it("still lets the command set DATABASE_URL explicitly", async () => {
+      const { env } = await provisionDumpingEnv((script) => `DATABASE_URL=postgres://configured/db bash ${script}`);
+      expect(env.DATABASE_URL).toBe("postgres://configured/db");
+      expect(env.DATABASE_MIGRATION_URL).toBe("<unset>");
+    });
   });
 
   it("uses the latest repo-managed provision script when reusing an existing worktree", async () => {
