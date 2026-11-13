@@ -35,14 +35,6 @@ describe("sanitizeInheritedPaperclipEnv", () => {
     sanitizeInheritedPaperclipEnv(base);
     expect(base.DATABASE_URL).toBe("postgres://paperclip:secret@db/paperclip");
   });
-
-  it("lets an explicit env layered on top of the sanitized base set DATABASE_URL", () => {
-    const merged = {
-      ...sanitizeInheritedPaperclipEnv({ DATABASE_URL: "ambient", PATH: "/usr/bin" }),
-      DATABASE_URL: "configured",
-    };
-    expect(merged).toEqual({ DATABASE_URL: "configured", PATH: "/usr/bin" });
-  });
 });
 
 describe("runChildProcess database credential inheritance", () => {

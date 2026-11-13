@@ -71,8 +71,8 @@ describe.skipIf(process.platform === "win32")("local browser subscription login"
     if (platform === "unknown") targetPlatform("linux", "x64", true, "unknown");
     const home = await fakeCli("codex", [
       '[ "$1 $2" = "login --device-auth" ] || exit 11',
-      '[ "$HOME" = "$CLAUDE_CONFIG_DIR" ] && [ "$HOME" != "$CODEX_HOME" ] && [ "$CODEX_HOME" = "$PAPERCLIP_TEST_LOGIN_CODEX_HOME" ] || exit 12',
-      '[ "$PWD" = "$PAPERCLIP_TEST_LOGIN_CWD" ] || exit 13',
+      '[ "$HOME" = "$CLAUDE_CONFIG_DIR" ] && [ "$HOME" != "$CODEX_HOME" ] && [ "$CODEX_HOME" = "$TEST_LOGIN_CODEX_HOME" ] || exit 12',
+      '[ "$PWD" = "$TEST_LOGIN_CWD" ] || exit 13',
       '[ -z "$OPENAI_API_KEY$CODEX_API_KEY$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 14',
       'printf "1. Open this link in your browser and sign in to your account\\nhttps://auth.openai.com/codex/device\\n2. Enter this one-time code (expires in 15 minutes)\\nABCD-EFGHJ\\n"',
     ].join("\n"));
@@ -81,8 +81,8 @@ describe.skipIf(process.platform === "win32")("local browser subscription login"
     const ambientHome = path.join(root!, "unrelated-host-home");
     await mkdir(ambientHome, { mode: 0o700 });
     for (const key of ["HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]) vi.stubEnv(key, ambientHome);
-    vi.stubEnv("PAPERCLIP_TEST_LOGIN_CODEX_HOME", home);
-    vi.stubEnv("PAPERCLIP_TEST_LOGIN_CWD", process.cwd());
+    vi.stubEnv("TEST_LOGIN_CODEX_HOME", home);
+    vi.stubEnv("TEST_LOGIN_CWD", process.cwd());
     for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])
       vi.stubEnv(key, "unrelated-host-value");
     const login = startLocalBrowserLogin("openai", home);

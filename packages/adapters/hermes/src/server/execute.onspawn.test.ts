@@ -8,7 +8,7 @@
  * @see https://github.com/paperclipai/paperclip/issues/8723
  */
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 
 // Mock the adapter-utils server-utils module that execute.ts imports from.
 // We intercept runChildProcess so we can inspect its opts without spawning
@@ -224,5 +224,35 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       if (previousApiKey === undefined) delete process.env.PAPERCLIP_API_KEY;
       else process.env.PAPERCLIP_API_KEY = previousApiKey;
     }
+  });
+
+  describe("server database credentials", () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    async function childEnv(overrides: Record<string, unknown> = {}) {
+      const { ctx } = makeCtx(overrides);
+      // The fixture only carries the fields execute() reads in these tests.
+      await execute(ctx as unknown as Parameters<typeof execute>[0]);
+      const mocked = vi.mocked(serverUtils.runChildProcess);
+      const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
+      const opts: { env?: Record<string, string> } = lastCall[3];
+      return opts.env ?? {};
+    }
+
+    it("does not inherit the server's DATABASE_URL or DATABASE_MIGRATION_URL", async () => {
+      vi.stubEnv("DATABASE_URL", "postgres://paperclip:ambient-secret@db/paperclip");
+      vi.stubEnv("DATABASE_MIGRATION_URL", "postgres://migrator:ambient-secret@db/paperclip");
+      const env = await childEnv();
+      expect(env.DATABASE_URL).toBeUndefined();
+      expect(env.DATABASE_MIGRATION_URL).toBeUndefined();
+    });
+
+    it("still passes a DATABASE_URL the agent configures explicitly", async () => {
+      vi.stubEnv("DATABASE_URL", "postgres://paperclip:ambient-secret@db/paperclip");
+      vi.stubEnv("DATABASE_MIGRATION_URL", "postgres://migrator:ambient-secret@db/paperclip");
+      const env = await childEnv({ env: { DATABASE_URL: "configured" } });
+      expect(env.DATABASE_URL).toBe("configured");
+      expect(env.DATABASE_MIGRATION_URL).toBeUndefined();
+    });
   });
 });
