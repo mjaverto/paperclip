@@ -14,6 +14,7 @@ import {
   asStringArray,
   parseObject,
   ensurePathInEnv,
+  sanitizeInheritedPaperclipEnv,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
@@ -209,7 +210,7 @@ export async function testEnvironment(
         configDir: preparedExecutionTargetRuntime.assetDirs.xdgConfig,
       });
     }
-    const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }));
+    const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...sanitizeInheritedPaperclipEnv(process.env), ...preparedRuntimeConfig.env }));
 
     const cwdInvalid = checks.some((check) => check.code === "opencode_cwd_invalid");
     if (cwdInvalid) {

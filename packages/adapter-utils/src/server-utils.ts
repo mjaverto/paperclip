@@ -3610,13 +3610,26 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
+/**
+ * Database connection env the Paperclip server reads at startup
+ * (server/src/config.ts, packages/db). Both URLs embed the Postgres password,
+ * so an agent subprocess must never inherit them from the server process.
+ * An adapter that explicitly configures one of these keys still passes it
+ * through, because callers merge their own env after the sanitized base.
+ */
+export const SERVER_DATABASE_CREDENTIAL_ENV_KEYS = ["DATABASE_URL", "DATABASE_MIGRATION_URL"];
+
 export function sanitizeInheritedPaperclipEnv(
   baseEnv: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.PAPERCLIPAI_CMD;
   for (const key of Object.keys(env)) {
-    if (AGENT_IDENTITY_ENV_KEYS.includes(key.toUpperCase())) {
+    const upperKey = key.toUpperCase();
+    if (
+      AGENT_IDENTITY_ENV_KEYS.includes(upperKey) ||
+      SERVER_DATABASE_CREDENTIAL_ENV_KEYS.includes(upperKey)
+    ) {
       delete env[key];
       continue;
     }

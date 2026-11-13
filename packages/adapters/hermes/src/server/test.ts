@@ -10,6 +10,7 @@ import type {
   AdapterEnvironmentTestResult,
   AdapterEnvironmentCheck,
 } from "@paperclipai/adapter-utils";
+import { sanitizeInheritedPaperclipEnv } from "@paperclipai/adapter-utils/server-utils";
 
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -339,7 +340,7 @@ export async function testEnvironment(
     if (remote) {
       checks.push({ level: "error", code: "hermes_remote_probe_unsupported", message: "Hermes connection testing requires a local execution environment." });
     } else {
-      const env = { ...process.env };
+      const env = { ...sanitizeInheritedPaperclipEnv(process.env) };
       for (const [key, value] of Object.entries((config.env ?? {}) as Record<string, unknown>)) {
         if (typeof value === "string") env[key] = value;
       }

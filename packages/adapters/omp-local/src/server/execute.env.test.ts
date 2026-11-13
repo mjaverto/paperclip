@@ -19,6 +19,7 @@ const WATCHED_KEYS = [
   "PAPERCLIP_AGENT_ID",
   "UNRELATED_AMBIENT",
   "DATABASE_URL",
+  "DATABASE_MIGRATION_URL",
 ] as const;
 
 function fakeOmpScript(dumpPath: string): string {
@@ -40,7 +41,7 @@ describe("omp_local agent process environment", () => {
     await fs.rm(scratch.root, { recursive: true, force: true });
   });
 
-  it("keeps the server's own Paperclip secrets away from the agent while configured env still wins", async () => {
+  async function runWithAgentEnv(agentEnv: Record<string, string>) {
     const cwd = path.join(scratch.root, "work");
     const command = path.join(scratch.root, "omp");
     const dumpPath = path.join(scratch.root, "child-env.json");
@@ -52,6 +53,7 @@ describe("omp_local agent process environment", () => {
     vi.stubEnv("PAPERCLIP_PSQL_PATH", "/server/only/psql");
     vi.stubEnv("UNRELATED_AMBIENT", "inherited");
     vi.stubEnv("DATABASE_URL", "ambient-database-url");
+    vi.stubEnv("DATABASE_MIGRATION_URL", "ambient-migration-url");
 
     const result = await execute({
       runId: "run-env-1",
@@ -62,14 +64,18 @@ describe("omp_local agent process environment", () => {
         cwd,
         model: "anthropic/claude-stub",
         promptTemplate: "go",
-        env: { DATABASE_URL: "explicit-database-url" },
+        env: agentEnv,
       },
       context: {},
       onLog: async () => {},
     });
 
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(await fs.readFile(dumpPath, "utf8"))).toEqual({
+    return JSON.parse(await fs.readFile(dumpPath, "utf8"));
+  }
+
+  it("keeps the server's own Paperclip and database secrets away from the agent while configured env still wins", async () => {
+    expect(await runWithAgentEnv({ DATABASE_URL: "explicit-database-url" })).toEqual({
       // Server-only Paperclip values never reach the agent.
       PAPERCLIP_AGENT_JWT_SECRET: null,
       PAPERCLIP_PSQL_PATH: null,
@@ -78,6 +84,16 @@ describe("omp_local agent process environment", () => {
       UNRELATED_AMBIENT: "inherited",
       // An agent's own configured env overrides the server's ambient value.
       DATABASE_URL: "explicit-database-url",
+      // Not configured by the agent, so the server's ambient value is dropped.
+      DATABASE_MIGRATION_URL: null,
+    });
+  }, 30_000);
+
+  it("does not hand the server's ambient database URLs to an agent that configures neither", async () => {
+    expect(await runWithAgentEnv({})).toMatchObject({
+      DATABASE_URL: null,
+      DATABASE_MIGRATION_URL: null,
+      UNRELATED_AMBIENT: "inherited",
     });
   }, 30_000);
 });

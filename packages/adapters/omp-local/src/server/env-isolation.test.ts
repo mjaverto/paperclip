@@ -12,6 +12,7 @@ const WATCHED_KEYS = [
   "PAPERCLIP_PSQL_PATH",
   "UNRELATED_AMBIENT",
   "DATABASE_URL",
+  "DATABASE_MIGRATION_URL",
 ] as const;
 
 function fakeOmpScript(dumpDir: string): string {
@@ -34,6 +35,8 @@ const EXPECTED = {
   PAPERCLIP_PSQL_PATH: null,
   UNRELATED_AMBIENT: "inherited",
   DATABASE_URL: "explicit-database-url",
+  // Ambient on the server but not configured by the agent, so it must be dropped.
+  DATABASE_MIGRATION_URL: null,
 };
 
 describe("omp_local discovery and environment-test process environment", () => {
@@ -48,6 +51,7 @@ describe("omp_local discovery and environment-test process environment", () => {
     vi.stubEnv("PAPERCLIP_PSQL_PATH", "/server/only/psql");
     vi.stubEnv("UNRELATED_AMBIENT", "inherited");
     vi.stubEnv("DATABASE_URL", "ambient-database-url");
+    vi.stubEnv("DATABASE_MIGRATION_URL", "ambient-migration-url");
     resetOmpModelsCacheForTests();
   });
 
@@ -81,5 +85,21 @@ describe("omp_local discovery and environment-test process environment", () => {
     expect(result.checks.map((c) => c.code)).toContain("omp_models_discovered");
     expect(JSON.parse(await fs.readFile(path.join(root, "models.json"), "utf8"))).toEqual(EXPECTED);
     expect(JSON.parse(await fs.readFile(path.join(root, "probe.json"), "utf8"))).toEqual(EXPECTED);
+  }, 60_000);
+
+  it("drops the ambient database URLs from discovery and the probe when the agent configures none", async () => {
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "omp_local",
+      config: { command, cwd: root, model: "anthropic/claude-stub" },
+    });
+    expect(result.checks.map((c) => c.code)).toContain("omp_models_discovered");
+    for (const file of ["models.json", "probe.json"]) {
+      expect(JSON.parse(await fs.readFile(path.join(root, file), "utf8"))).toMatchObject({
+        DATABASE_URL: null,
+        DATABASE_MIGRATION_URL: null,
+        UNRELATED_AMBIENT: "inherited",
+      });
+    }
   }, 60_000);
 });
