@@ -41,6 +41,8 @@ describe("credential-free Runner acceptance catalog", () => {
       adapterConfig.acpxAgent === "pi")).toBe(false);
     expect(directAcceptanceProfiles.some(({ adapterType }) =>
       adapterType === "pi_local")).toBe(false);
+    expect(directAcceptanceProfiles.some(({ adapterType }) =>
+      adapterType === "omp_local")).toBe(false);
   });
 
   it("contains no launch authority, provider credentials, or managed providers", () => {

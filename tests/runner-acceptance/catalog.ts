@@ -13,7 +13,9 @@ import type {
   RunnerAcceptanceProfile,
 } from "./types.js";
 
-const excludedBuiltInAdapterTypes = new Set(["paperclip_runner", "pi_local"]);
+// paperclip_runner is the native runtime itself. pi_local and the fork-only omp_local have no
+// qualified acceptance profile, so they stay outside the direct-adapter catalog.
+const excludedBuiltInAdapterTypes = new Set(["paperclip_runner", "pi_local", "omp_local"]);
 
 const directBuiltInAdapterTypes = [
   "acpx_local",
