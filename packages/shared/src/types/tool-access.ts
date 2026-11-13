@@ -1,3 +1,4 @@
+import type { McpAppToolUi, McpIcon } from "../mcp-apps.js";
 import type {
   ConnectionTokenIssuanceOutcome,
   ConnectionTokenIssuancePath,
@@ -266,6 +267,9 @@ export interface ConnectionGrant {
       appSlug?: string;
       accessRevision?: string;
       lastAccessRefreshAt?: string;
+      /** Unsettled Cloud binding changes; retained until the exact revision is delivered. */
+      bindingSync?: { id: string; removeInstallationIds: string[] };
+      continuityRetry?: { at: string; attempts: number; revision: string };
       lastWebhookAt?: string;
       webhookHealth?: "pending" | "healthy" | "unhealthy";
     };
@@ -565,6 +569,10 @@ export interface ToolCatalogEntry {
   inputSchema: Record<string, unknown> | null;
   outputSchema: Record<string, unknown> | null;
   annotations: Record<string, unknown> | null;
+  /** MCP Apps view declaration (`_meta.ui`), when the tool renders one. */
+  uiMeta?: McpAppToolUi | null;
+  /** Sanitized provider icons (SEP-973), when the tool declares any. */
+  icons?: McpIcon[] | null;
   riskLevel: ToolRiskLevel;
   isReadOnly: boolean;
   isWrite: boolean;
@@ -751,6 +759,8 @@ export interface ToolMcpGatewayToken {
   createdByUserId: string | null;
   /** Agent client delegation. Null with an issuing agent identifies an unbound legacy client. */
   responsibleUserId?: string | null;
+  /** True for an agent-created client token whose value has not yet been revealed to its responsible person. */
+  pendingReveal?: boolean;
   createdAt: Date | string;
   updatedAt: Date | string;
 }
@@ -780,6 +790,12 @@ export interface ToolProfileSummary {
   assignmentCount: number;
   appliesToAgentCount: number;
   isCompanyDefault: boolean;
+}
+
+/** Saved configuration only; no effective-access summary or pending-review calculation. */
+export interface ToolProfileConfiguration extends Omit<ToolProfile, "newToolsPendingCount"> {
+  entries: ToolProfileEntry[];
+  bindings: ToolProfileBinding[];
 }
 
 export interface ToolProfileWithDetails extends ToolProfile {
@@ -1009,6 +1025,11 @@ export interface ToolAppAttentionItem {
   newToolsPendingReviewCount: number;
   newToolsPendingProfiles: ToolAppAttentionProfileNewTools[];
   reasons: ToolAppAttentionReason[];
+}
+
+export interface ToolConnectionReviewCounts {
+  pendingActionRequestCount: number;
+  quarantinedCatalogEntryCount: number;
 }
 
 export interface ToolAppsAttentionResponse {
@@ -1741,4 +1762,18 @@ export interface ToolConnectionTestCallStatus {
   requestedAt: string;
   /** ISO timestamp the request was resolved (approved/denied/cancelled), when applicable. */
   resolvedAt?: string | null;
+}
+
+/** A connected tool's provider icons, keyed by its tool gateway name. */
+export interface ProviderToolIconEntry {
+  /** `mcp.<app>-<connection>:<tool>`, as agents see the tool. */
+  gatewayToolName: string;
+  /** `app_<name>_<digest>`, the name native runners (and so their transcripts) use. */
+  nativeToolName?: string;
+  icons: McpIcon[];
+}
+
+/** `GET /api/companies/:companyId/tool-icons` */
+export interface ProviderToolIconsResponse {
+  icons: ProviderToolIconEntry[];
 }

@@ -22,6 +22,46 @@ import { aggregateProtocolEvalCampaign, sanitizeProtocolEvalRuns } from '../runn
 
 import { childScript, fixture, success } from './controller-fixture.mjs';
 
+test('expected ACPX profile reaches the child through function and command-line entrypoints', async t => {
+  const profile = { agent: 'claude', agentRuntimeVersion: '0.3.286' };
+  for (const mode of ['function', 'cli']) for (const stale of [false, true]) {
+    const requests = mode === 'function' ? 1 : 0;
+    const f = await fixture(t, { providerProfile: 'claude', builtAcpxProfile: profile, requests });
+    const expectedAcpxProfile = { ...profile, ...(stale ? { agentRuntimeVersion: '0.3.263' } : {}) };
+    let calls = 0;
+    let result;
+    if (mode === 'function') {
+      result = await runControlledEval({ manifestPath: f.manifestPath, ...f.requests[0], environment: f.environment, expectedAcpxProfile,
+        transport: async () => { calls++; return success('anthropic'); } });
+    } else {
+      let code = 0;
+      try {
+        await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./run.mjs', runtime)), '--request', f.requests[0].requestPath,
+          '--output', f.requests[0].outputPath, '--expected-acpx-profile', JSON.stringify(expectedAcpxProfile)], {
+          env: { PATH: process.env.PATH, ANTHROPIC_API_KEY: f.environment.ANTHROPIC_API_KEY, PAPERCLIP_RUNNER_EVAL_CONTROL_MANIFEST: f.manifestPath }, timeout: 15000,
+        });
+      } catch (error) { if (typeof error.code !== 'number') throw error; code = error.code; }
+      result = { code, report: JSON.parse(await readFile(f.requests[0].outputPath, 'utf8')).controllerAccounting };
+    }
+    assert.equal(calls, stale ? 0 : requests);
+    assert.equal(result.code === 0, !stale);
+    assert.equal(result.report.accounting.requests.length, stale ? 0 : requests);
+  }
+});
+
+test('malformed profile arguments fail before opening controlled evidence', async t => {
+  for (const [providerProfile, profiles] of [
+    ['claude', [null, [], 'profile', { overflow: 'x'.repeat(4097) }]],
+    ['codex', [{}]],
+  ]) {
+    const f = await fixture(t, { providerProfile });
+    for (const expectedAcpxProfile of profiles) {
+      await assert.rejects(runControlledEval({ manifestPath: f.manifestPath, ...f.requests[0], environment: {}, expectedAcpxProfile }), /Expected ACPX profile/);
+    }
+    await assert.rejects(stat(f.manifest.outputDirectory), { code: 'ENOENT' });
+  }
+});
+
 test('real child requests reserve before dispatch, stop at the cap and retain only controller credentials', async t => {
   const f = await fixture(t);
   let calls = 0;
@@ -786,4 +826,43 @@ test('retained failure codes distinguish native startup, child exit and invalid 
   assert.equal((await child.run()).report.failure, 'child_failed');
   const artifact = await fixture(t, { missingRoute: true, requests: 0 });
   assert.equal((await artifact.run()).report.failure, 'artifact_invalid');
+});
+
+
+test('model readiness rejects a missing terminal model receipt even when its reservation has a reviewed bound', async t => {
+  const f = await fixture(t, { requests: 1 });
+  f.manifest.overhead.accountingReadiness = 'model_requests';
+  for (const component of f.manifest.overhead.components) delete component.provisionalBound;
+  await f.save();
+  const result = await f.run(0, async () => Response.json({ error: 'synthetic refusal' }, { status: 429 }));
+  assert.equal(result.report.failure, 'request_accounting_unbounded');
+  const summary = await summarizeControlledCampaign(f.manifest);
+  assert.equal(summary.incompleteAttempts, 1);
+  assert.equal(summary.heldUsd, '0.014000000');
+  assert.equal(summary.operatingReconciliation, 'pending');
+});
+
+
+test('model readiness rejects zero model requests and keeps the full allocation', async t => {
+  const f = await fixture(t, { requests: 0 });
+  f.manifest.overhead.accountingReadiness = 'model_requests';
+  for (const component of f.manifest.overhead.components) delete component.provisionalBound;
+  await f.save();
+  const result = await f.run();
+  assert.equal(result.report.failure, 'request_accounting_unbounded');
+  assert.equal(result.report.accounting.requests.length, 0);
+  const summary = await summarizeControlledCampaign(f.manifest);
+  assert.equal(summary.incompleteAttempts, 1); assert.equal(summary.heldUsd, '0.014000000');
+});
+
+test('mixed-policy private histories keep the pending operating reconciliation warning', async t => {
+  const model = await fixture(t, { requests: 1 }), strict = await fixture(t, { requests: 1 });
+  model.manifest.campaignId = 'model-readiness-history';
+  model.manifest.overhead.accountingReadiness = 'model_requests';
+  for (const component of model.manifest.overhead.components) delete component.provisionalBound;
+  await model.save(); await model.run(); await strict.run();
+  const bundles = await Promise.all([model, strict].map(f => packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0', environment: f.environment })));
+  const history = await summarizeControlledEvidence(bundles);
+  assert.equal(history.incompleteAttempts, 0); assert.equal(history.operatingHeldUsd, '0.008000000');
+  assert.equal(history.accountingReadiness, undefined); assert.equal(history.operatingReconciliation, 'pending');
 });

@@ -170,6 +170,9 @@ export async function summarizeControlledEvidence(bundles, options) {
 function history(campaigns) {
   const sum = field => usd(campaigns.reduce((total, campaign) => total + units(campaign[field]), 0n));
   return { schema: 'paperclip.runner-eval.control-history/v1', costStatus: campaigns.some(c => c.costStatus === 'incomplete') ? 'incomplete' : 'provisional',
+    ...(campaigns.length && campaigns.every(c => c.accountingReadiness === 'model_requests')
+      ? { accountingReadiness: 'model_requests' } : {}),
+    ...(campaigns.some(c => c.operatingReconciliation === 'pending') ? { operatingReconciliation: 'pending' } : {}),
     knownUsd: sum('knownUsd'), heldUsd: sum('heldUsd'), committedUsd: sum('committedUsd'), operatingHeldUsd: sum('operatingHeldUsd'),
     incompleteAttempts: campaigns.reduce((total, c) => total + c.incompleteAttempts, 0), overBudget: campaigns.some(c => c.overBudget), campaigns };
 }

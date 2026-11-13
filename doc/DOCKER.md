@@ -77,6 +77,27 @@ Downstream deployment tooling must verify [source proof](cloud-build-readiness.m
 the standard image attestation, the exact-source migrator, and its own composed
 image before rollout. Resolve immutable digests instead of deploying mutable tags.
 
+## Runner image
+
+The `runner-artifacts` target builds the Runner alone: the daemon, the Runner
+package's build output, the remote provider pack and its transport archives.
+The `runner-artifacts-slim` target is the same image without the transport
+archives. Neither depends on the server or UI build, and no other target
+depends on them yet. `.github/workflows/runner-image.yml` builds and checks
+both on pull requests, for Linux AMD64 and ARM64, and publishes them from
+`master` as `ghcr.io/paperclipai/paperclip-runner`. See
+[`doc/runner-image-contract.md`](runner-image-contract.md) for the layout, the
+identity rules and how to consume the image.
+
+`.github/workflows/docker.yml` builds the application image on `master` and on
+tags only. `.github/workflows/docker-app-check.yml` builds the `build` and
+`runner-provider-pack` stages on a pull request that changes the `Dockerfile`,
+`.dockerignore` or the step that vendors the Runner into the server, so a
+change to how the application image gets its Runner fails before it merges.
+It refreshes the lockfile before the build, as `docker.yml` does. It holds no
+credential: it reads the build cache that `docker.yml` writes on `master`
+anonymously, never writes it, and exports and publishes nothing.
+
 ## One-liner (build + run)
 
 ```sh
@@ -403,18 +424,3 @@ input file times are normalized in both stages so fresh checkouts do not force
 Cargo to rebuild unchanged source. Changes made by build scripts still reach
 Cargo's normal validation. The final application copy excludes Cargo's target
 directory as before. Cache misses only cost compilation time.
-
-Pull requests that change the Dockerfile, Docker ignore rules, or Runner native
-inputs also build the isolated `runner-build` target in `Docker Runner check`.
-The check runs `bash scripts/check-docker-runner-cache.sh` against a disposable
-copy of tracked source and the actual Docker ignore rules. It compiles a baseline
-and exports a local cache, removes that builder, changes a Rust metadata constant,
-and rebuilds on a fresh builder using only the exported cache. It requires a
-cached dependency build, an unchanged dependency recipe, and changed metadata
-from the real binary. It also verifies that a dependency declaration change
-alters the recipe. The probe exports small metadata results instead of importing
-a large test image into the Docker daemon. Temporary builders and cache files
-are removed afterward. It catches missing embedded inputs before the post-merge
-build. It uses a GitHub-hosted runner with read-only repository access and never
-publishes images or registry caches. Allow up to 20 minutes for its cold build and
-source rebuild.
