@@ -8,7 +8,7 @@ model request.
 The catalog covers:
 
 - every current built-in direct adapter except the explicitly deferred Pi
-  adapter;
+  adapter and the fork-only OMP adapter (`omp_local`);
 - the external-plugin direct-adapter compatibility contract;
 - Paperclip Runner with Codex;
 - Paperclip Runner with the qualified OpenCode model; and
@@ -56,6 +56,8 @@ write evidence, screenshots, history, or public reports.
 This foundation does not include:
 
 - Pi or any Pi transitive package;
+- OMP (`omp_local`, this fork's adapter): a Pi derivative with its own auth
+  broker and no qualified acceptance profile;
 - Claude Managed or AWS AgentCore;
 - Daytona, remote images, live provider execution, or cost accounting;
 - provider-key loading, secret references, auth-file discovery, or tracked env

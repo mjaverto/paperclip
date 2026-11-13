@@ -973,8 +973,8 @@ or scheduled check; the manual launcher alone does not perform it.
 
 The trusted report job applies a reviewed `report-lock.patch` before its frozen
 install. `report-lock.json` pins the input lock, patch and resulting lock hashes.
-This updates existing patch identities and the already declared yaml dependency
-without registry resolution. The worker target and its lock artifact never
+This applies the reviewed lock correction recorded by `report-lock.patch`, whose
+contents vary with each lockfile refresh, without registry resolution. The worker target and its lock artifact never
 control report dependencies. An already-reviewed output lock is used unchanged. An unknown committed lock fails before install;
 review the correction with dependency changes. The existing lockfile-refresh bot runs
 `prepare-report-lock.mjs --refresh` and includes the correction and hashes in its

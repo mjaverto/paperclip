@@ -170,7 +170,7 @@ selected credential, not an upstream gateway's internal model mapping.
 
 The matrix covers Claude, Codex, Grok, Gemini, OpenCode, and Hermes local where
 Paperclip's managed-connection capability table admits them, with applicable
-legacy/native variants and both UI entry points. Cursor local, Kimi, and Pi
+legacy/native variants and both UI entry points. Cursor local, Kimi, Pi, and OMP
 remain visible product gaps for managed connection onboarding. Remote OpenClaw
 and Hermes gateways, Cursor Cloud, managed Claude/AWS AgentCore, process/HTTP,
 and generic legacy ACPX are deliberately excluded.
