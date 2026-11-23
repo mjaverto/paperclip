@@ -19,6 +19,8 @@ it.skipIf(pendingDependabotLock).each(['valid', 'unknown-lock', 'changed-patch',
       const committed = execFileSync('git', ['show', 'HEAD:pnpm-lock.yaml'], { cwd: path.resolve(here, '../..') });
       const policy = JSON.parse(await readFile(path.join(relative, 'report-lock.json'), 'utf8'));
       const committedHash = createHash('sha256').update(committed).digest('hex');
+      // A lock that resolves offline unchanged is admitted with an empty patch and equal hashes.
+      const corrects = policy.inputSha256 !== policy.outputSha256;
       expect([policy.inputSha256, policy.outputSha256]).toContain(committedHash);
       const lock = path.join(root, 'pnpm-lock.yaml');
       await writeFile(lock, committed);
@@ -27,7 +29,7 @@ it.skipIf(pendingDependabotLock).each(['valid', 'unknown-lock', 'changed-patch',
         expect(createHash('sha256').update(await readFile(lock)).digest('hex')).toBe(policy.outputSha256);
         await writeFile(lock, committed);
       }
-      if (committedHash === policy.outputSha256) {
+      if (corrects && committedHash === policy.outputSha256) {
         execFileSync('git', ['apply', '--reverse', path.join(relative, 'report-lock.patch')], { cwd: root });
       }
       const input = await readFile(lock);
@@ -36,7 +38,7 @@ it.skipIf(pendingDependabotLock).each(['valid', 'unknown-lock', 'changed-patch',
       if (variant === 'changed-patch') await writeFile(path.join(relative, 'report-lock.patch'), 'changed');
       if (variant === 'wrong-output') { policy.outputSha256 = '0'.repeat(64); await writeFile(path.join(relative, 'report-lock.json'), JSON.stringify(policy)); }
       if (variant === 'valid') {
-        expect(await prepareReportLock(root)).toBe('reviewed-correction');
+        expect(await prepareReportLock(root)).toBe(corrects ? 'reviewed-correction' : 'already-reviewed');
         expect(createHash('sha256').update(await readFile(lock)).digest('hex')).toBe(policy.outputSha256);
         expect(await prepareReportLock(root)).toBe('already-reviewed');
         const reviewed = parse(await readFile(lock, 'utf8'));
@@ -48,6 +50,10 @@ it.skipIf(pendingDependabotLock).each(['valid', 'unknown-lock', 'changed-patch',
           expect(reviewed.packages, name).toHaveProperty(`${name}@${entry.version.split('(')[0]}`);
           expect(reviewed.snapshots, name).toHaveProperty(`${name}@${entry.version}`);
         }
+      } else if (!corrects && variant === 'changed-patch') {
+        // Without a correction the patch is never applied, so the admitted lock stays untouched.
+        expect(await prepareReportLock(root)).toBe('already-reviewed');
+        expect(await readFile(lock)).toEqual(input);
       } else {
         await expect(prepareReportLock(root)).rejects.toThrow();
         expect(await readFile(lock)).toEqual(variant === 'unknown-lock' ? Buffer.from('unknown\n') : input);
