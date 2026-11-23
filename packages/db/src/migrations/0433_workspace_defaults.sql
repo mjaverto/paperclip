@@ -1,3 +1,2 @@
--- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 ALTER TABLE "user_workspace_preferences" ALTER COLUMN "coordinator_workspace_enabled" SET DEFAULT true;--> statement-breakpoint
 ALTER TABLE "user_workspace_preferences" ADD COLUMN IF NOT EXISTS "classic_workspace_enabled" boolean DEFAULT false NOT NULL;

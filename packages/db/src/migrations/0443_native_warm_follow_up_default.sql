@@ -1,4 +1,3 @@
--- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 -- Native Codex, OpenCode and Claude agents stored lifecycleMode = 'per_turn'
 -- because agent creation wrote the old default. Clear it so the agent follows
 -- the product default (warm for local Codex and OpenCode; per-turn elsewhere,

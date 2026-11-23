@@ -1,4 +1,3 @@
--- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 DROP INDEX "heartbeat_runs_cancelled_workspace_preservation_idx";--> statement-breakpoint
 CREATE INDEX "heartbeat_runs_cancelled_workspace_preservation_idx" ON "heartbeat_runs" USING btree ("id","company_id") WHERE "heartbeat_runs"."runtime_mode" = 'native' AND "heartbeat_runs"."status" = 'cancelled'
         AND "heartbeat_runs"."runner_profile_json"->'nativeWorkspaceSync'->>'state' = 'prepared'

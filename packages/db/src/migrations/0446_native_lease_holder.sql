@@ -1,4 +1,3 @@
--- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 ALTER TABLE "native_run_finalizations" ADD COLUMN "lease_holder" jsonb;--> statement-breakpoint
 CREATE INDEX "native_run_finalizations_finalizer_lease_idx" ON "native_run_finalizations" USING btree ("lease_expires_at") WHERE "native_run_finalizations"."lease_owner" like 'native-finalizer:%';--> statement-breakpoint
 CREATE INDEX "native_run_finalizations_cleanup_lease_idx" ON "native_run_finalizations" USING btree ("lease_expires_at") WHERE "native_run_finalizations"."lease_owner" like 'native-cleanup:%';

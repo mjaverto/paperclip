@@ -1,4 +1,3 @@
--- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 ALTER TABLE "company_secret_proposals" DROP CONSTRAINT IF EXISTS "company_secret_proposals_secret_id_company_secrets_id_fk";
 --> statement-breakpoint
 ALTER TABLE "company_secret_proposals" ADD CONSTRAINT "company_secret_proposals_secret_id_company_secrets_id_fk" FOREIGN KEY ("secret_id") REFERENCES "public"."company_secrets"("id") ON DELETE cascade ON UPDATE no action;

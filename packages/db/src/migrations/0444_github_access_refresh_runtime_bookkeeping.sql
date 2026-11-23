@@ -1,4 +1,3 @@
--- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 -- A GitHub access refresh (scheduled health checks and continuity renewal)
 -- rewrites the grant's access fence, refresh time, and webhook binding debt even
 -- when the installation and repository view is unchanged. Those fields are

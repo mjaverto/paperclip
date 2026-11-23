@@ -1,4 +1,3 @@
--- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 ALTER TABLE "chat_voice_inbound_calls" ADD COLUMN IF NOT EXISTS "provider_account_id" text;--> statement-breakpoint
 ALTER TABLE "chat_voice_inbound_calls" ADD COLUMN IF NOT EXISTS "cleanup_confirmed_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "chat_voice_inbound_calls" ADD COLUMN IF NOT EXISTS "cleanup_next_attempt_at" timestamp with time zone;--> statement-breakpoint
