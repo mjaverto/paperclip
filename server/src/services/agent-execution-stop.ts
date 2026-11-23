@@ -1,4 +1,5 @@
 import { readProcessStartedAt } from "./hot-restart.js";
+import { readLeaseReleaseDeferral } from "./environment-lease-release-deferral.js";
 import { runUsedConversationAdapter } from "./conversation-continuation.js";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRuns, nativeRunFinalizations, type Db } from "@paperclipai/db";
@@ -8,20 +9,39 @@ import { isCancelledNativeStartup } from "./cancelled-native-startup.js";
 
 /** Cancellation changes admission. Process and lease evidence controls cleanup. */
 export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
-  if (!agentIds.length) return true;
-  const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
+  return (await agentExecutionStopBlocker(db, agentIds)) === null;
+}
+
+export async function agentExecutionStopBlocker(db: Db, agentIds: string[]): Promise<string | null> {
+  if (!agentIds.length) return null;
+  // Per-run decisions need only these scalar columns. The full row carries
+  // result_json/context_snapshot/runner_profile_json (MBs per run), so it is
+  // loaded by id only for the few runs whose branch calls a helper needing it.
+  const runs = await db.select({
+    id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, status: heartbeatRuns.status,
+    controllerLeaseExpiresAt: heartbeatRuns.controllerLeaseExpiresAt, processPid: heartbeatRuns.processPid,
+    processGroupId: heartbeatRuns.processGroupId, processStartedAt: heartbeatRuns.processStartedAt,
+    runtimeMode: heartbeatRuns.runtimeMode, startedAt: heartbeatRuns.startedAt,
+    executionStage: heartbeatRuns.executionStage,
+    // Extracted only where the legacy cancelled branch reads it, so Postgres never detoasts result_json for other runs.
+    cancellationState: sql<string | null>`case when ${heartbeatRuns.status} = 'cancelled' and ${heartbeatRuns.runtimeMode} = 'legacy' then ${heartbeatRuns.resultJson}->'executionCancellation'->>'state' end`,
+  }).from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
+  const loadFullRun = async (runId: string) =>
+    (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).limit(1))[0];
   const runIds = db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
   const leases = await db.select().from(environmentLeases).where(or(
     inArray(environmentLeases.heartbeatRunId, runIds),
     inArray(sql`${environmentLeases.metadata}->>'agentId'`, agentIds),
   ));
-  if (leases.some(lease => (!lease.releasedAt && !(lease.status === "retained" && lease.cleanupStatus === "success")) || lease.status === "pending_cleanup" || lease.cleanupStatus === "failed")) return false;
+  const deferred = leases.find(lease => lease.status === "active" && readLeaseReleaseDeferral(lease.metadata));
+  if (deferred) return `environment_lease_release_deferred:${readLeaseReleaseDeferral(deferred.metadata)!.reason}`;
+  if (leases.some(lease => (!lease.releasedAt && !(lease.status === "retained" && lease.cleanupStatus === "success")) || lease.status === "pending_cleanup" || lease.cleanupStatus === "failed")) return "environment_lease_unreleased";
   const coordinators = await db.select().from(nativeRunFinalizations)
     .where(inArray(nativeRunFinalizations.runId, runIds));
   const now = new Date();
   const abandoned = coordinators.filter(row => row.leaseOwner);
   if (abandoned.some(row => !row.leaseExpiresAt || row.leaseExpiresAt > now || row.resultId ||
-      runs.find(run => run.id === row.runId)?.status !== "cancelled")) return false;
+      runs.find(run => run.id === row.runId)?.status !== "cancelled")) return "native_finalization_owned";
   const absent = (pid: number) => {
     try { process.kill(pid, 0); return false; }
     catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
@@ -30,14 +50,14 @@ export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
     if (!coordinator.controllerPid || absent(coordinator.controllerPid)) continue;
     const observed = await readProcessStartedAt(coordinator.controllerPid).catch(() => null);
     if (!observed || !coordinator.controllerProcessStartedAt ||
-        new Date(observed).getTime() === coordinator.controllerProcessStartedAt.getTime()) return false;
+        new Date(observed).getTime() === coordinator.controllerProcessStartedAt.getTime()) return "native_controller_alive";
   }
   for (const run of runs) {
-    if (!["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status)) return false;
-    if (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > new Date()) return false;
+    if (!["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status)) return "run_not_terminal";
+    if (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > new Date()) return "run_controller_lease_held";
     const runLeases = leases.filter(lease => lease.heartbeatRunId === run.id);
     if (runLeases.some(lease => lease.provider && lease.provider !== "local")) {
-      if (run.status === "cancelled" && !runLeases.every(hasRemoteTerminationReceipt)) return false;
+      if (run.status === "cancelled" && !runLeases.every(hasRemoteTerminationReceipt)) return "remote_stop_unconfirmed";
       continue;
     }
     let processAlive = Boolean(run.processPid && !absent(run.processPid));
@@ -49,26 +69,33 @@ export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
         if (run.processGroupId === run.processPid) groupAlive = false;
       }
     }
-    if (processAlive || groupAlive) return false;
+    if (processAlive || groupAlive) return "run_process_alive";
     if (run.status !== "cancelled" || !run.startedAt) continue;
+    const coordinator = coordinators.find(row => row.runId === run.id);
     if (run.runtimeMode === "native" && !run.processPid && !run.processGroupId &&
-        !await hasNativeLocalProcessStop(db, run.companyId, run.id) &&
-        !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id))) return false;
+        !await hasNativeLocalProcessStop(db, run.companyId, run.id)) {
+      const full = await loadFullRun(run.id);
+      if (!full || !await isCancelledNativeStartup(db, full, coordinator)) return "native_stop_unproven";
+    }
     if (run.runtimeMode === "legacy" && !run.processPid && !run.processGroupId &&
-        (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state !== "acknowledged" &&
-        !(run.executionStage === "settled" && !await runUsedConversationAdapter(db, run)) &&
-        !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id))) return false;
+        run.cancellationState !== "acknowledged") {
+      // Only unacknowledged cancelled legacy runs need the large JSON columns.
+      const full = await loadFullRun(run.id);
+      if (!full) return "legacy_stop_unproven";
+      if (!(run.executionStage === "settled" && !await runUsedConversationAdapter(db, full)) &&
+          !await isCancelledNativeStartup(db, full, coordinator)) return "legacy_stop_unproven";
+    }
   }
   // Release an expired owner only after its cancelled execution has stop proof.
   for (const coordinator of abandoned) {
     const [cleared] = await db.update(nativeRunFinalizations).set({ leaseOwner: null, leaseExpiresAt: null, updatedAt: now })
       .where(and(eq(nativeRunFinalizations.runId, coordinator.runId),
         eq(nativeRunFinalizations.leaseOwner, coordinator.leaseOwner!),
-        eq(nativeRunFinalizations.leaseExpiresAt, coordinator.leaseExpiresAt!),
+        sql`date_trunc('milliseconds', ${nativeRunFinalizations.leaseExpiresAt}) = ${coordinator.leaseExpiresAt!.toISOString()}::timestamptz`,
         eq(nativeRunFinalizations.controllerGeneration, coordinator.controllerGeneration),
         eq(nativeRunFinalizations.phase, coordinator.phase), isNull(nativeRunFinalizations.resultId)))
       .returning({ runId: nativeRunFinalizations.runId });
-    if (!cleared) return false;
+    if (!cleared) return "native_finalization_release_raced";
   }
-  return true;
+  return null;
 }

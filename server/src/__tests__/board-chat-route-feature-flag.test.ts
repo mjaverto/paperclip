@@ -1,5 +1,6 @@
 import express from "express";
 import { EventEmitter } from "node:events";
+import type * as ChildProcess from "node:child_process";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -17,7 +18,11 @@ vi.mock("../services/index.js", () => ({
   issueService: () => mockIssueService,
 }));
 
-vi.mock("node:child_process", () => ({ spawn: mockSpawn }));
+// Keep the real exports: imported adapter-utils modules promisify execFile at load.
+vi.mock("node:child_process", async () => ({
+  ...(await vi.importActual<typeof ChildProcess>("node:child_process")),
+  spawn: mockSpawn,
+}));
 
 vi.mock("../services/fast-responses.js", () => ({
   enqueueFastResponse: vi.fn(async () => undefined),

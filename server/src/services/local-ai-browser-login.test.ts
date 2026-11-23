@@ -71,8 +71,8 @@ describe.skipIf(process.platform === "win32")("local browser subscription login"
     if (platform === "unknown") targetPlatform("linux", "x64", true, "unknown");
     const home = await fakeCli("codex", [
       '[ "$1 $2" = "login --device-auth" ] || exit 11',
-      '[ "$HOME" = "$CLAUDE_CONFIG_DIR" ] && [ "$HOME" != "$CODEX_HOME" ] && [ "$CODEX_HOME" = "$PAPERCLIP_TEST_LOGIN_CODEX_HOME" ] || exit 12',
-      '[ "$PWD" = "$PAPERCLIP_TEST_LOGIN_CWD" ] || exit 13',
+      '[ "$HOME" = "$CLAUDE_CONFIG_DIR" ] && [ "$HOME" != "$CODEX_HOME" ] && [ "$CODEX_HOME" = "$LOCAL_LOGIN_TEST_CODEX_HOME" ] || exit 12',
+      '[ "$PWD" = "$LOCAL_LOGIN_TEST_CWD" ] || exit 13',
       '[ -z "$OPENAI_API_KEY$CODEX_API_KEY$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 14',
       'printf "1. Open this link in your browser and sign in to your account\\nhttps://auth.openai.com/codex/device\\n2. Enter this one-time code (expires in 15 minutes)\\nABCD-EFGHJ\\n"',
     ].join("\n"));
@@ -81,8 +81,8 @@ describe.skipIf(process.platform === "win32")("local browser subscription login"
     const ambientHome = path.join(root!, "unrelated-host-home");
     await mkdir(ambientHome, { mode: 0o700 });
     for (const key of ["HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]) vi.stubEnv(key, ambientHome);
-    vi.stubEnv("PAPERCLIP_TEST_LOGIN_CODEX_HOME", home);
-    vi.stubEnv("PAPERCLIP_TEST_LOGIN_CWD", process.cwd());
+    vi.stubEnv("LOCAL_LOGIN_TEST_CODEX_HOME", home);
+    vi.stubEnv("LOCAL_LOGIN_TEST_CWD", process.cwd());
     for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])
       vi.stubEnv(key, "unrelated-host-value");
     const login = startLocalBrowserLogin("openai", home);
@@ -210,6 +210,27 @@ describe.skipIf(process.platform === "win32")("local browser subscription login"
     const credential = JSON.parse(await readFile(path.join(home, ".credentials.json"), "utf8"));
     expect(credential.claudeAiOauth.accessToken).toMatch(/^sk-ant-oat01-/);
     expect((await stat(path.join(home, ".credentials.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  it("reports a rejected Claude code while the CLI waits for a terminal retry", async () => {
+    const url = "https://claude.com/cai/oauth/authorize?client_id=cid&code=abcdefgh&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&response_type=code&scope=user&state=0123456789abcdef";
+    const home = await fakeCli("claude", [
+      'printf "Welcome to Claude Code\\nOpening browser to sign in…\\nBrowser didn\x27t open? Use the url below to sign in (c to copy)\\n"',
+      `printf '%s\\n' '${url}'`,
+      'printf "Paste code here if prompted >\\n"',
+      'read -r entered',
+      'printf "OAuth error: Invalid code. Press Enter to retry.\\n"',
+      'exec sleep 60',
+    ].join("\n"));
+    const login = startLocalBrowserLogin("anthropic", home);
+    try {
+      await vi.waitFor(() => expect(login.authorizationUrl).toBe(url), { timeout: 5000 });
+      login.submitCode?.("fixture-code");
+      await vi.waitFor(() => expect(login.outcome).toBe("failure"), { timeout: 5000 });
+      expect(login.error).toContain("Claude rejected the authorization code");
+      expect(login.error).not.toContain("fixture-code");
+      await expect(readFile(path.join(home, ".credentials.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { login.abort(); }
   });
 
   it("terminates the local provider process when sign-in is cancelled", async () => {

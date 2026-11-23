@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { setupCommandFailureResultJson } from "../services/workspace-setup-command-failure.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -8,12 +9,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseEnvContents } from "dotenv";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
   companies,
   createDb,
+  closeRegisteredClients,
   executionWorkspaces,
   heartbeatRuns,
   issueComments,
@@ -87,6 +89,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 
 const RUNTIME_OWNED_GIT_BRANCH_METADATA = {
   createdByRuntime: true,
@@ -134,15 +137,19 @@ function workspaceBranchIncoherenceFingerprintForTest(input: {
 }
 
 const leasedRunIds = new Set<string>();
-const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
-const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+const externalRuntimeControlDatabaseUrl = resolveExternalTestDatabaseUrl("PAPERCLIP_WORKSPACE_RUNTIME_CONTROL_TEST_DATABASE_URL");
+const embeddedPostgresSupport: Awaited<ReturnType<typeof getEmbeddedPostgresTestSupport>> = externalRuntimeControlDatabaseUrl ? { supported: true } : await getEmbeddedPostgresTestSupport();
+// The explicit fixture belongs only to the service-control suite. Other DB
+// suites must not allocate an embedded or admin-owned database in this mode.
+const describeEmbeddedPostgres = !externalRuntimeControlDatabaseUrl && embeddedPostgresSupport.supported ? describe : describe.skip;
+const describeRuntimeControl = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
     `Skipping embedded Postgres workspace-runtime tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
   );
 }
-const provisionWorktreeScriptPath = new URL("../../../scripts/provision-worktree.sh", import.meta.url);
+const provisionWorktreeScriptPath = new URL("../../../scripts/setup-paperclip-worktree.sh", import.meta.url);
 
 async function runGit(cwd: string, args: string[]) {
   await execFileAsync("git", args, { cwd });
@@ -169,7 +176,7 @@ async function writeRegisteredSourceConfig(baseCwd: string, instanceId = "source
 
 async function createTempRepo(defaultBranch = "main") {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-repo-"));
-  await runGit(repoRoot, ["init"]);
+  await runGit(repoRoot, ["init", "--initial-branch", defaultBranch]);
   await runGit(repoRoot, ["config", "user.email", "paperclip@example.com"]);
   await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
   await fs.writeFile(path.join(repoRoot, "README.md"), "hello\n", "utf8");
@@ -335,6 +342,7 @@ function buildWorkspace(cwd: string): RealizedExecutionWorkspace {
     strategy: "project_primary",
     cwd,
     branchName: null,
+    branchCreatedByRuntime: false,
     worktreePath: null,
     warnings: [],
     created: false,
@@ -405,7 +413,7 @@ function createWorkspaceOperationRecorderDouble() {
       executionWorkspaceId = nextExecutionWorkspaceId;
     },
     recordOperation: async (input) => {
-      const result = await input.run();
+      const result = await input.run(async () => {});
       operations.push({
         phase: input.phase,
         command: input.command ?? null,
@@ -458,6 +466,7 @@ afterEach(async () => {
   delete process.env.PAPERCLIP_INSTANCE_ID;
   delete process.env.PAPERCLIP_WORKTREES_DIR;
   delete process.env.DATABASE_URL;
+  delete process.env.DATABASE_MIGRATION_URL;
   await resetRuntimeServicesForTests();
   // Registry reset does not clear the process-local allocation claims. A
   // failed-start fixture must not reserve another test's ephemeral port.
@@ -469,6 +478,7 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
     const sanitized = sanitizeRuntimeServiceBaseEnv({
       PATH: process.env.PATH,
       DATABASE_URL: "postgres://example.test/paperclip",
+      DATABASE_MIGRATION_URL: "postgres://migrator.example.test/paperclip",
       PAPERCLIP_HOME: "/tmp/paperclip-home",
       PAPERCLIP_INSTANCE_ID: "runtime-instance",
       BETTER_AUTH_URL: "https://parent.example.test",
@@ -483,6 +493,7 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
     expect(sanitized.BETTER_AUTH_URL).toBeUndefined();
     expect(sanitized.BETTER_AUTH_BASE_URL).toBeUndefined();
     expect(sanitized.DATABASE_URL).toBeUndefined();
+    expect(sanitized.DATABASE_MIGRATION_URL).toBeUndefined();
     expect(sanitized.npm_config_tailscale_auth).toBeUndefined();
     expect(sanitized.npm_config_authenticated_private).toBeUndefined();
     expect(sanitized.HOST).toBe("0.0.0.0");
@@ -973,6 +984,37 @@ describe("realizeExecutionWorkspace", () => {
       expect(workspace.created).toBe(true);
       expect(workspace.baseRefSha).toBe(await readGit(repoRoot, ["rev-parse", "release"]));
       await expect(fs.stat(path.join(workspace.cwd, ".git"))).resolves.toBeTruthy();
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("names a failed project provision command with its exit status and output (CF1)", async () => {
+    const repoRoot = await createTempRepo();
+    const config = buildExecutionWorkspaceAdapterConfig({
+      agentConfig: {},
+      projectPolicy: parseProjectExecutionWorkspacePolicy({
+        enabled: true,
+        defaultMode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree", baseRef: "main", provisionCommand: "bash ./scripts/missing-provisioner.sh" },
+      }),
+      issueSettings: null,
+      mode: "isolated_workspace",
+      legacyUseProjectWorkspace: null,
+    });
+    try {
+      const failure = await realizeExecutionWorkspace({
+        base: { baseCwd: repoRoot, source: "project_primary", projectId: "project-1", workspaceId: "workspace-1", repoUrl: null, repoRef: "HEAD" },
+        config,
+        issue: { id: "issue-1", identifier: "TEST-1", title: "Broken setup" },
+        agent: { id: "agent-1", name: "Test agent", companyId: "company-1" },
+      }).then(() => null, (error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(setupCommandFailureResultJson(failure)).toEqual({ setupCommandFailure: {
+        step: "workspace_provision", command: "bash ./scripts/missing-provisioner.sh", exitCode: 127,
+        output: expect.stringContaining("No such file or directory"),
+        message: expect.stringMatching(/^The project's workspace provision command "bash \.\/scripts\/missing-provisioner\.sh" failed with exit code 127: .*No such file or directory/),
+      } });
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true });
     }
@@ -1856,6 +1898,85 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
     await expect(fs.readFile(path.join(reused.cwd, ".paperclip-provision-created"), "utf8")).resolves.toBe("false\n");
   });
 
+  describe("provision command database credentials", () => {
+    async function provisionDumpingEnv(command: (script: string) => string) {
+      const repoRoot = await createTempRepo();
+      await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
+      await fs.writeFile(
+        path.join(repoRoot, "scripts", "dump-env.sh"),
+        [
+          "#!/usr/bin/env bash",
+          "set -euo pipefail",
+          "{",
+          "  printf 'DATABASE_URL=%s\\n' \"${DATABASE_URL-<unset>}\"",
+          "  printf 'DATABASE_MIGRATION_URL=%s\\n' \"${DATABASE_MIGRATION_URL-<unset>}\"",
+          "  printf 'database_url=%s\\n' \"${database_url-<unset>}\"",
+          "  printf 'PATH=%s\\n' \"${PATH-<unset>}\"",
+          "  printf 'UNRELATED_AMBIENT=%s\\n' \"${UNRELATED_AMBIENT-<unset>}\"",
+          "  printf 'PAPERCLIP_HOME=%s\\n' \"${PAPERCLIP_HOME-<unset>}\"",
+          "  printf 'PAPERCLIP_WORKSPACE_BRANCH=%s\\n' \"${PAPERCLIP_WORKSPACE_BRANCH-<unset>}\"",
+          "  printf 'PAPERCLIP_WORKSPACE_BASE_CWD=%s\\n' \"${PAPERCLIP_WORKSPACE_BASE_CWD-<unset>}\"",
+          "} > .paperclip-provision-env",
+        ].join("\n"),
+        "utf8",
+      );
+      await runGit(repoRoot, ["add", "scripts/dump-env.sh"]);
+      await runGit(repoRoot, ["commit", "-m", "Add env dumping provision script"]);
+
+      vi.stubEnv("DATABASE_URL", "postgres://paperclip:ambient-secret@db/paperclip");
+      vi.stubEnv("DATABASE_MIGRATION_URL", "postgres://migrator:ambient-secret@db/paperclip");
+      vi.stubEnv("database_url", "postgres://paperclip:ambient-lowercase-secret@db/paperclip");
+      vi.stubEnv("UNRELATED_AMBIENT", "inherited");
+      vi.stubEnv("PAPERCLIP_HOME", "/server/paperclip-home");
+      try {
+        const workspace = await realizeExecutionWorkspace({
+          base: {
+            baseCwd: repoRoot,
+            source: "project_primary",
+            projectId: "project-1",
+            workspaceId: "workspace-1",
+            repoUrl: null,
+            repoRef: "HEAD",
+          },
+          config: {
+            workspaceStrategy: {
+              type: "git_worktree",
+              branchTemplate: "{{issue.identifier}}-{{slug}}",
+              provisionCommand: command("./scripts/dump-env.sh"),
+            },
+          },
+          issue: { id: "issue-1", identifier: "PAP-650", title: "Dump provision env" },
+          agent: { id: "agent-1", name: "Codex Coder", companyId: "company-1" },
+        });
+        const dump = await fs.readFile(path.join(workspace.cwd, ".paperclip-provision-env"), "utf8");
+        return { repoRoot, env: Object.fromEntries(dump.trimEnd().split("\n").map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        })) as Record<string, string> };
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    }
+
+    it("keeps the server's ambient database URLs out of the provision command but keeps PATH and PAPERCLIP_* variables", async () => {
+      const { repoRoot, env } = await provisionDumpingEnv((script) => `bash ${script}`);
+      expect(env.DATABASE_URL).toBe("<unset>");
+      expect(env.DATABASE_MIGRATION_URL).toBe("<unset>");
+      expect(env.database_url).toBe("<unset>");
+      expect(env.PATH).toBe(process.env.PATH);
+      expect(env.UNRELATED_AMBIENT).toBe("inherited");
+      expect(env.PAPERCLIP_HOME).toBe("/server/paperclip-home");
+      expect(env.PAPERCLIP_WORKSPACE_BRANCH).toBe("PAP-650-dump-provision-env");
+      expect(env.PAPERCLIP_WORKSPACE_BASE_CWD).toBe(repoRoot);
+    });
+
+    it("still lets the command set DATABASE_URL explicitly", async () => {
+      const { env } = await provisionDumpingEnv((script) => `DATABASE_URL=postgres://configured/db bash ${script}`);
+      expect(env.DATABASE_URL).toBe("postgres://configured/db");
+      expect(env.DATABASE_MIGRATION_URL).toBe("<unset>");
+    });
+  });
+
   it("uses the latest repo-managed provision script when reusing an existing worktree", async () => {
     const repoRoot = await createTempRepo();
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
@@ -2038,7 +2159,7 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
 
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.copyFile(
-      fileURLToPath(new URL("../../../scripts/provision-worktree.sh", import.meta.url)),
+      fileURLToPath(new URL("../../../scripts/setup-paperclip-worktree.sh", import.meta.url)),
       path.join(repoRoot, "scripts", "provision-worktree.sh"),
     );
     await runGit(repoRoot, ["add", "scripts/provision-worktree.sh"]);
@@ -6671,16 +6792,18 @@ describeEmbeddedPostgres("workspace dirty quarantine branch repair", () => {
   }, 20_000);
 });
 
-describeEmbeddedPostgres("workspace runtime service control persistence", () => {
+describeRuntimeControl("workspace runtime service control persistence", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workspace-runtime-control-");
-    db = createDb(tempDb.connectionString);
+    if (!externalRuntimeControlDatabaseUrl) tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workspace-runtime-control-");
+    db = createDb(externalRuntimeControlDatabaseUrl ?? tempDb!.connectionString,
+      externalRuntimeControlDatabaseUrl ? { maxConnections: 4 } : undefined);
   }, 20_000);
 
   afterAll(async () => {
+    if (externalRuntimeControlDatabaseUrl) await closeRegisteredClients(externalRuntimeControlDatabaseUrl, { scope: "database" });
     await tempDb?.cleanup();
   });
 
@@ -6829,6 +6952,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
         strategy: "git_worktree",
         cwd: workspaceRoot,
         branchName: "feature/runtime-control",
+        branchCreatedByRuntime: false,
         worktreePath: workspaceRoot,
         warnings: [],
         created: false,
@@ -7002,6 +7126,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
       strategy: workspace.mode === "isolated_workspace" ? "git_worktree" : "project_primary",
       cwd: workspace.cwd,
       branchName: null,
+      branchCreatedByRuntime: false,
       worktreePath: workspace.mode === "isolated_workspace" ? workspace.cwd : null,
       warnings: [],
       created: false,
@@ -7281,14 +7406,14 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
         return result[0]!;
       }));
 
-      // The two lanes claim ports concurrently in-process. The allocator guarantees
-      // distinct ports, but not which lane wins the base port. It depends on the
-      // scheduling order. So assert order-independent invariants, not array index.
+      // A free-port probe is not a reservation. Both siblings must own distinct
+      // live ports in the allocator's bounded range even if the preferred port
+      // becomes unavailable before allocation.
       const lowerPort = Math.min(first.port!, second.port!);
       const upperPort = Math.max(first.port!, second.port!);
       const maxAllocatablePort = basePort + WORKSPACE_RUNTIME_PORT_ALLOCATION_ATTEMPTS - 1;
       expect(first.port).not.toBe(second.port);
-      expect(lowerPort).toBe(basePort);
+      expect(lowerPort).toBeGreaterThanOrEqual(basePort);
       expect(upperPort).toBeGreaterThan(basePort);
       expect(upperPort).toBeLessThanOrEqual(maxAllocatablePort);
       expect(first.url).toBe(`http://127.0.0.1:${first.port}`);
@@ -7330,7 +7455,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
 
   it("commits fixed-port reservations across the configured database idle timeout", async () => {
     const fixture = await createRuntimeFixture();
-    const readinessDb = createDb(tempDb!.connectionString, { idleTimeoutSeconds: 1, maxConnections: 1 });
+    const readinessDb = createDb(externalRuntimeControlDatabaseUrl ?? tempDb!.connectionString, { idleTimeoutSeconds: 1, maxConnections: 1 });
     const [initialConnection] = await readinessDb.$client<{ pid: number }[]>`select pg_backend_pid() as pid`;
     const cleanupRuntimeHome = await createRuntimeHome();
     const workspace = fixture.workspaces[0]!;
@@ -7974,22 +8099,11 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
 
     const reservePort = async () => {
       for (let attempt = 0; attempt < 100; attempt += 1) {
-        const probe = net.createServer();
-        // macOS can allocate an entire ephemeral range above 55535. Pick a
-        // bounded candidate so the test's HMR companion remains a valid port.
-        await new Promise<void>((resolve) => {
-          probe.once("error", () => resolve());
-          probe.listen(20_000 + Math.floor(Math.random() * 20_000), "127.0.0.1", resolve);
-        });
-        if (!probe.listening) continue;
-        const address = probe.address();
-        const port = typeof address === "object" && address ? address.port : null;
-        await new Promise<void>((resolve, reject) => {
-          probe.close((error) => error ? reject(error) : resolve());
-        });
-        if (port && port <= 55_535 && (port < 42_000 || port > 42_999)) return port;
+        // Keep both listeners below ephemeral client ports and outside the broker range.
+        const port = 12_000 + Math.floor(Math.random() * 6_000);
+        if (await isLoopbackPortFree(port) && await isLoopbackPortFree(port + 10_000)) return port;
       }
-      throw new Error("Failed to reserve an HTTPS backfill test port outside the broker range");
+      throw new Error("Failed to reserve app and HMR ports for the HTTPS backfill test");
     };
     const isLoopbackPortFree = async (port: number) => {
       const probe = net.createServer();
@@ -8171,7 +8285,6 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
       await stopRuntimeServicesForProjectWorkspace({
         db,
         projectWorkspaceId,
-        workspaceCwd: workspaceRoot,
       }).catch(() => undefined);
       await resetRuntimeServicesForTests();
       await fs.rm(paperclipHome, { recursive: true, force: true });
@@ -9435,6 +9548,7 @@ describe("workspace realization request additionalSources", () => {
       strategy: "project_primary",
       cwd: "/anchor",
       branchName: null,
+      branchCreatedByRuntime: false,
       worktreePath: null,
       warnings: [],
       created: false,
