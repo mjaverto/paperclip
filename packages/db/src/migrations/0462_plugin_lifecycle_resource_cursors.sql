@@ -1,3 +1,4 @@
+-- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 CREATE TABLE "plugin_lifecycle_resource_cursors" (
 	"plugin_id" uuid NOT NULL,
 	"company_id" uuid NOT NULL,

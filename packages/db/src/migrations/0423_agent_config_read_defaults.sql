@@ -1,3 +1,4 @@
+-- paperclip:migration-compat requires_staging: shipped in the 2026-11-22 upstream sync; the previous fork release (a8115cb300) is stopped and replaced in one deploy, so no old-release writer runs while this migration holds its locks or reshapes data.
 WITH added AS (
   INSERT INTO principal_permission_grants (
     company_id, principal_type, principal_id, permission_key, scope
